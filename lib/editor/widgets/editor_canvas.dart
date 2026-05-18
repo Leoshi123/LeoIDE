@@ -7,8 +7,8 @@ import 'cursor_painter.dart';
 
 /// Canvas personalizado que renderiza el editor de código.
 ///
-/// Usa CustomPainter de Flutter para dibujar solo las líneas visibles
-/// (virtual scrolling), más el cursor, números de línea y manejo de input.
+/// Usa Focus.onKeyEvent para teclado físico (Linux/desktop) y un
+/// TextField oculto para el teclado virtual (Android).
 class EditorCanvas extends StatefulWidget {
   final TextEngine engine;
   final VirtualViewport viewport;
@@ -16,8 +16,6 @@ class EditorCanvas extends StatefulWidget {
   final Color textColor;
   final Color lineNumberColor;
   final Color lineNumberBgColor;
-
-  /// Callback cuando el texto cambia (para que el padre actualice estado).
   final VoidCallback? onTextChanged;
 
   const EditorCanvas({
@@ -61,26 +59,29 @@ class _EditorCanvasState extends State<EditorCanvas>
     _inputHandler = EditorInputHandler(
       engine: widget.engine,
       focusNode: _focusNode,
-      onTextChanged: () {
-        _cursorPainter.resetBlink();
-        _updateViewport();
-        widget.onTextChanged?.call();
-        if (mounted) setState(() {});
-      },
-      onCursorMoved: () {
-        _cursorPainter.resetBlink();
-        widget.viewport.ensureCursorVisible(
-          widget.engine.cursor.line,
-          widget.engine.cursor.column,
-        );
-        if (mounted) setState(() {});
-      },
+      onTextChanged: _onEngineChanged,
+      onCursorMoved: _onCursorMoved,
     );
+  }
+
+  void _onEngineChanged() {
+    _cursorPainter.resetBlink();
+    _updateViewport();
+    widget.onTextChanged?.call();
+    if (mounted) setState(() {});
+  }
+
+  void _onCursorMoved() {
+    _cursorPainter.resetBlink();
+    widget.viewport.ensureCursorVisible(
+      widget.engine.cursor.line,
+      widget.engine.cursor.column,
+    );
+    if (mounted) setState(() {});
   }
 
   void _updateViewport() {
     widget.viewport.totalLines = widget.engine.lineCount;
-    // Actualizar maxLineWidth
     double maxWidth = 0;
     for (int i = 0; i < widget.engine.lineCount; i++) {
       final lineLen = widget.engine.lineAt(i).length.toDouble();
@@ -99,41 +100,76 @@ class _EditorCanvasState extends State<EditorCanvas>
 
   @override
   Widget build(BuildContext context) {
-    return GestureDetector(
-      onTapDown: (details) => _handleTap(details.localPosition),
-      onPanStart: (details) => _handlePanStart(details.localPosition),
-      onPanUpdate: (details) => _handlePanUpdate(details.delta),
-      onPanEnd: (_) => _handlePanEnd(),
-      child: KeyboardListener(
-        focusNode: _focusNode,
-        autofocus: true,
-        includeSemantics: false,
-        onKeyEvent: (event) {
-          _inputHandler?.handleKeyEvent(event);
-          return KeyEventResult.handled;
+    return Focus(
+      focusNode: _focusNode,
+      autofocus: true,
+      onKeyEvent: (node, event) {
+        return _inputHandler?.handleKeyEvent(node, event) ??
+            KeyEventResult.ignored;
+      },
+      child: GestureDetector(
+        onTapDown: (details) => _handleTap(details.localPosition),
+        onPanStart: (_) {},
+        onPanUpdate: (details) {
+          widget.viewport.scrollBy(-details.delta.dx, -details.delta.dy);
+          setState(() {});
         },
-        child: ClipRect(
-          child: AnimatedBuilder(
-            animation: _blinkController,
-            builder: (context, child) {
-              return CustomPaint(
-                painter: _EditorPainter(
-                  engine: widget.engine,
-                  viewport: widget.viewport,
-                  cursorPainter: _cursorPainter,
-                  backgroundColor: widget.backgroundColor,
-                  textColor: widget.textColor,
-                  lineNumberColor: widget.lineNumberColor,
-                  lineNumberBgColor: widget.lineNumberBgColor,
-                  elapsedSeconds:
-                      (_blinkController.lastElapsedDuration?.inMilliseconds ?? 0)
-                              .toDouble() /
-                          1000.0,
+        onPanEnd: (_) {},
+        child: Stack(
+          children: [
+            // Canvas del editor
+            ClipRect(
+              child: AnimatedBuilder(
+                animation: _blinkController,
+                builder: (context, _) {
+                  return CustomPaint(
+                    painter: _EditorPainter(
+                      engine: widget.engine,
+                      viewport: widget.viewport,
+                      cursorPainter: _cursorPainter,
+                      backgroundColor: widget.backgroundColor,
+                      textColor: widget.textColor,
+                      lineNumberColor: widget.lineNumberColor,
+                      lineNumberBgColor: widget.lineNumberBgColor,
+                      elapsedSeconds: (_blinkController.lastElapsedDuration
+                                  ?.inMilliseconds ??
+                              0)
+                          .toDouble() /
+                      1000.0,
+                    ),
+                    size: Size.infinite,
+                  );
+                },
+              ),
+            ),
+            // TextField oculto para teclado virtual (Android)
+            Positioned(
+              left: -1,
+              top: -1,
+              child: SizedBox(
+                width: 1,
+                height: 1,
+                child: TextField(
+                  controller: _inputHandler?.controller,
+                  focusNode: _focusNode,
+                  autofocus: true,
+                  enableSuggestions: false,
+                  autocorrect: false,
+                  style: const TextStyle(
+                    fontSize: 1,
+                    color: Color(0x00000000),
+                  ),
+                  decoration: const InputDecoration(
+                    border: InputBorder.none,
+                    isDense: true,
+                    contentPadding: EdgeInsets.zero,
+                  ),
+                  // En Linux, el teclado físico se maneja vía Focus.onKeyEvent
+                  // En móvil, este TextField capturará el teclado virtual
                 ),
-                size: Size.infinite,
-              );
-            },
-          ),
+              ),
+            ),
+          ],
         ),
       ),
     );
@@ -150,20 +186,9 @@ class _EditorCanvasState extends State<EditorCanvas>
       lineHeight: widget.viewport.lineHeight,
     );
     _cursorPainter.resetBlink();
-    setState(() {});
-
-    // En móvil, esto activa el teclado virtual
     _inputHandler?.connect();
-  }
-
-  void _handlePanStart(Offset position) {}
-
-  void _handlePanUpdate(Offset delta) {
-    widget.viewport.scrollBy(-delta.dx, -delta.dy);
     setState(() {});
   }
-
-  void _handlePanEnd() {}
 }
 
 /// Painter que renderiza líneas de texto, cursor y números de línea.
@@ -218,15 +243,13 @@ class _EditorPainter extends CustomPainter {
 
   void _drawLineNumbers(Canvas canvas, Size size) {
     final (start, end) = viewport.visibleRange;
-    final textPainter = TextPainter(
-      textDirection: TextDirection.ltr,
-    );
+    final tp = TextPainter(textDirection: TextDirection.ltr);
 
     for (int i = start; i < end; i++) {
       final y = viewport.lineToY(i);
       if (y < -viewport.lineHeight || y > size.height) continue;
 
-      textPainter.text = TextSpan(
+      tp.text = TextSpan(
         text: '${i + 1}',
         style: TextStyle(
           color: lineNumberColor,
@@ -234,21 +257,15 @@ class _EditorPainter extends CustomPainter {
           fontFamily: 'monospace',
         ),
       );
-      textPainter.layout(maxWidth: gutterWidth - 10);
-      textPainter.paint(
-        canvas,
-        Offset(gutterWidth - textPainter.width - 8, y + 3),
-      );
+      tp.layout(maxWidth: gutterWidth - 10);
+      tp.paint(canvas, Offset(gutterWidth - tp.width - 8, y + 3));
     }
   }
 
   void _drawText(Canvas canvas, Size size) {
     final (start, end) = viewport.visibleRange;
-    final textPainter = TextPainter(
-      textDirection: TextDirection.ltr,
-    );
-
-    final textStyle = TextStyle(
+    final tp = TextPainter(textDirection: TextDirection.ltr);
+    final style = TextStyle(
       color: textColor,
       fontSize: viewport.lineHeight * 0.75,
       fontFamily: 'monospace',
@@ -258,13 +275,12 @@ class _EditorPainter extends CustomPainter {
       final y = viewport.lineToY(i);
       if (y < -viewport.lineHeight || y > size.height) continue;
 
-      final lineText = engine.lineAt(i);
-      final displayText = lineText.replaceAll('\t', '  ');
-      final x = gutterWidth + 8 - viewport.scrollX;
-
-      textPainter.text = TextSpan(text: displayText, style: textStyle);
-      textPainter.layout(maxWidth: size.width - gutterWidth - 16);
-      textPainter.paint(canvas, Offset(x, y + 2));
+      tp.text = TextSpan(
+        text: engine.lineAt(i).replaceAll('\t', '  '),
+        style: style,
+      );
+      tp.layout(maxWidth: size.width - gutterWidth - 16);
+      tp.paint(canvas, Offset(gutterWidth + 8 - viewport.scrollX, y + 2));
     }
   }
 
@@ -276,8 +292,7 @@ class _EditorPainter extends CustomPainter {
       charWidth: viewport.charWidth,
       lineHeight: viewport.lineHeight,
     );
-    final cursorScreenX = x + gutterWidth + 8;
-    cursorPainter.paint(canvas, cursorScreenX, y, elapsedSeconds);
+    cursorPainter.paint(canvas, x + gutterWidth + 8, y, elapsedSeconds);
   }
 
   @override

@@ -1,268 +1,209 @@
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'text_engine.dart';
+import 'dart:math';
 
-/// Conecta el teclado virtual/físico de Flutter con el TextEngine.
+/// Conecta el teclado con el TextEngine.
 ///
-/// En móvil, al tocar el editor necesitamos que aparezca el teclado virtual.
-/// En desktop/linux, necesitamos capturar las teclas físicas.
-/// Flutter no hace esto automáticamente con CustomPainter, hay que hacerlo
-/// manualmente usando TextInputConnection + KeyboardListener.
+/// Para teclado físico (Linux/desktop): usa Focus.onKeyEvent.
+/// Para teclado virtual (Android): usa un TextField oculto.
 class EditorInputHandler {
   final TextEngine _engine;
-  late TextInputConnection _textInputConnection;
-  final TextInputConfiguration _textInputConfig;
   final FocusNode _focusNode;
 
-  // Callbacks para notificar cambios en la UI
+  /// Controller sincronizado con el engine para el teclado virtual.
+  late final TextEditingController _controller;
+
+  /// Flag para evitar loops al sincronizar.
+  bool _syncing = false;
+
   VoidCallback? onTextChanged;
   VoidCallback? onCursorMoved;
 
   EditorInputHandler({
     required TextEngine engine,
     required FocusNode focusNode,
-    TextInputAction textInputAction = TextInputAction.newline,
     this.onTextChanged,
     this.onCursorMoved,
   })  : _engine = engine,
-        _focusNode = focusNode,
-        _textInputConfig = TextInputConfiguration(
-          inputType: TextInputType.multiline,
-          autocorrect: false,
-          enableSuggestions: false,
-          enableDeltaModel: true,
-          textInputAction: textInputAction,
-        ) {
-    _setupTextInput();
+        _focusNode = focusNode {
+    _controller = TextEditingController(text: _engine.text);
+    _controller.addListener(_onControllerChanged);
   }
 
-  void _setupTextInput() {
-    _textInputConnection = TextInput.attach(
-      _focusNode,
-      _textInputConfig,
-    )..setEditingState(_buildEditingState());
-  }
+  TextEditingController get controller => _controller;
 
-  /// Conecta el teclado cuando el editor recibe foco.
-  void connect() {
-    _textInputConnection = TextInput.attach(
-      _focusNode,
-      _textInputConfig,
-    );
-    _updateEditingState();
-  }
-
-  /// Desconecta el teclado cuando el editor pierde foco.
-  void disconnect() {
-    _textInputConnection.close();
-  }
-
-  /// Procesa deltas de texto enviados por el teclado virtual.
-  void handleDeltas(List<TextEditingDelta> deltas) {
-    for (final delta in deltas) {
-      if (delta is TextEditingDeltaInsertion) {
-        _handleInsertion(delta);
-      } else if (delta is TextEditingDeltaDeletion) {
-        _handleDeletion(delta);
-      } else if (delta is TextEditingDeltaReplacement) {
-        _handleReplacement(delta);
-      } else if (delta is TextEditingDeltaNonTextUpdate) {
-        // Solo movimiento de cursor, selección, etc.
-        _handleNonTextUpdate(delta);
-      }
-    }
-    _updateEditingState();
-    onTextChanged?.call();
-  }
-
-  /// Procesa teclas del teclado físico (Linux/desktop).
-  void handleKeyEvent(KeyEvent event) {
-    if (event is! KeyDownEvent && event is! KeyRepeatEvent) return;
-
-    // Solo teclas de caracteres imprimibles
-    if (event.logicalKey != null && event.logicalKey.keyLabel.isNotEmpty) {
-      final label = event.logicalKey.keyLabel;
-      if (label.length == 1 && !label.startsWith(' ') && label.codeUnitAt(0) >= 32) {
-        _engine.insertAtCursor(label);
-        _updateEditingState();
-        onTextChanged?.call();
-        return;
-      }
+  /// Procesa teclas del teclado físico vía Focus.onKeyEvent.
+  KeyEventResult handleKeyEvent(FocusNode node, KeyEvent event) {
+    if (event is! KeyDownEvent && event is! KeyRepeatEvent) {
+      return KeyEventResult.ignored;
     }
 
-    // Teclas especiales
-    if (event is KeyDownEvent || event is KeyRepeatEvent) {
-      _handleSpecialKey(event);
-    }
-  }
-
-  /// Procesa inserción desde la barra de símbolos.
-  void insertSymbol(String symbol) {
-    _engine.insertAtCursor(symbol);
-    _updateEditingState();
-    onTextChanged?.call();
-  }
-
-  // ── Handlers internos ──
-
-  void _handleInsertion(TextEditingDeltaInsertion delta) {
-    // Insertar el texto directamente
-    _engine.insertAtCursor(delta.text);
-  }
-
-  void _handleDeletion(TextEditingDeltaDeletion delta) {
-    // Determinar si es backspace o delete forward
-    // Por convención, si la longitud del texto decrece en 1+
-    final deletedLen = delta.deletedLength;
-    if (deletedLen > 0) {
-      _engine.backspace(deletedLen);
-    }
-  }
-
-  void _handleReplacement(TextEditingDeltaReplacement delta) {
-    // Reemplazo completo (e.g., pegar texto, IME composition)
-    final oldLen = delta.replacedRange.length;
-    for (int i = 0; i < oldLen; i++) {
-      _engine.backspace();
-    }
-    _engine.insertAtCursor(delta.replacementText);
-  }
-
-  void _handleNonTextUpdate(TextEditingDeltaNonTextUpdate delta) {
-    // Solo actualizar cursor si hay nueva selección
-    if (delta.selection != null) {
-      final newOffset = delta.selection!.baseOffset;
-      if (newOffset >= 0 && newOffset <= _engine.length) {
-        final (line, col) = _engine.pieceTable.positionToLineCol(newOffset);
-        // Move cursor - simplificado, la selección se manejará en Fase 2
-      }
-    }
-  }
-
-  void _handleSpecialKey(KeyEvent event) {
     final key = event.logicalKey;
-    final isCtrl = event is KeyDownEvent &&
-        (HardwareKeyboard.instance.isControlPressed ||
-         HardwareKeyboard.instance.isMetaPressed);
+    final isCtrl = HardwareKeyboard.instance.isControlPressed ||
+        HardwareKeyboard.instance.isMetaPressed;
     final isShift = HardwareKeyboard.instance.isShiftPressed;
 
-    // Backspace
-    if (key == LogicalKeyboardKey.backspace) {
-      _engine.backspace();
-      _updateEditingState();
-      onTextChanged?.call();
-      return;
-    }
+    // --- Shortcuts con Ctrl ---
+    if (isCtrl) {
+      switch (key) {
+        case LogicalKeyboardKey.keyZ:
+          if (isShift) {
+            _engine.redo();
+          } else {
+            _engine.undo();
+          }
+          _syncControllerFromEngine();
+          onTextChanged?.call();
+          return KeyEventResult.handled;
 
-    // Delete
-    if (key == LogicalKeyboardKey.delete) {
-      _engine.deleteForward();
-      _updateEditingState();
-      onTextChanged?.call();
-      return;
-    }
+        case LogicalKeyboardKey.keyY:
+          _engine.redo();
+          _syncControllerFromEngine();
+          onTextChanged?.call();
+          return KeyEventResult.handled;
 
-    // Enter
-    if (key == LogicalKeyboardKey.enter) {
-      _engine.insertNewline();
-      _updateEditingState();
-      onTextChanged?.call();
-      return;
-    }
+        case LogicalKeyboardKey.keyA:
+          // Select all (placeholder Fase 2)
+          return KeyEventResult.handled;
 
-    // Tab
-    if (key == LogicalKeyboardKey.tab) {
-      _engine.insertTab();
-      _updateEditingState();
-      onTextChanged?.call();
-      return;
-    }
+        case LogicalKeyboardKey.keyS:
+          // Save (placeholder Fase 4)
+          return KeyEventResult.handled;
 
-    // Flechas
-    if (key == LogicalKeyboardKey.arrowUp) {
-      _engine.moveCursorUp();
-      onCursorMoved?.call();
-      return;
-    }
-    if (key == LogicalKeyboardKey.arrowDown) {
-      _engine.moveCursorDown();
-      onCursorMoved?.call();
-      return;
-    }
-    if (key == LogicalKeyboardKey.arrowLeft) {
-      if (isCtrl) {
-        // Saltar palabra (placeholder)
+        default:
+          break;
       }
-      _engine.moveCursorLeft();
-      onCursorMoved?.call();
-      return;
-    }
-    if (key == LogicalKeyboardKey.arrowRight) {
-      if (isCtrl) {
-        // Saltar palabra (placeholder)
-      }
-      _engine.moveCursorRight();
-      onCursorMoved?.call();
-      return;
     }
 
-    // Ctrl+Z = Undo
-    if (isCtrl && key == LogicalKeyboardKey.keyZ) {
-      if (isShift) {
-        _engine.redo();
+    // --- Teclas de navegación ---
+    switch (key) {
+      case LogicalKeyboardKey.arrowUp:
+        _engine.moveCursorUp();
+        onCursorMoved?.call();
+        _syncControllerFromEngine();
+        return KeyEventResult.handled;
+
+      case LogicalKeyboardKey.arrowDown:
+        _engine.moveCursorDown();
+        onCursorMoved?.call();
+        _syncControllerFromEngine();
+        return KeyEventResult.handled;
+
+      case LogicalKeyboardKey.arrowLeft:
+        _engine.moveCursorLeft();
+        onCursorMoved?.call();
+        _syncControllerFromEngine();
+        return KeyEventResult.handled;
+
+      case LogicalKeyboardKey.arrowRight:
+        _engine.moveCursorRight();
+        onCursorMoved?.call();
+        _syncControllerFromEngine();
+        return KeyEventResult.handled;
+
+      case LogicalKeyboardKey.home:
+        _engine.moveToLineStart();
+        onCursorMoved?.call();
+        return KeyEventResult.handled;
+
+      case LogicalKeyboardKey.end:
+        _engine.moveToLineEnd();
+        onCursorMoved?.call();
+        return KeyEventResult.handled;
+
+      default:
+        break;
+    }
+
+    return KeyEventResult.ignored;
+  }
+
+  /// Procesa entrada de texto desde el teclado físico caracter por caracter.
+  void handleTextInput(String text) {
+    if (text.isEmpty) return;
+
+    _syncing = true;
+
+    for (final char in text.characters) {
+      if (char == '\n') {
+        _engine.insertNewline();
+      } else if (char.codeUnitAt(0) == 127) { // Delete
+        _engine.deleteForward();
+      } else if (char.codeUnitAt(0) == 8) { // Backspace
+        _engine.backspace();
       } else {
-        _engine.undo();
+        _engine.insertAtCursor(char);
       }
-      onTextChanged?.call();
-      return;
     }
 
-    // Ctrl+Y = Redo
-    if (isCtrl && key == LogicalKeyboardKey.keyY) {
-      _engine.redo();
-      onTextChanged?.call();
-      return;
-    }
-
-    // Ctrl+A = Seleccionar todo (placeholder)
-    if (isCtrl && key == LogicalKeyboardKey.keyA) {
-      // Fase 2+
-    }
-
-    // Ctrl+S = Guardar (placeholder)
-    if (isCtrl && key == LogicalKeyboardKey.keyS) {
-      // Fase 4+
-    }
-
-    // Home / End
-    if (key == LogicalKeyboardKey.home) {
-      _engine.moveToLineStart();
-      onCursorMoved?.call();
-      return;
-    }
-    if (key == LogicalKeyboardKey.end) {
-      _engine.moveToLineEnd();
-      onCursorMoved?.call();
-      return;
-    }
+    _syncing = false;
+    _syncControllerFromEngine();
+    onTextChanged?.call();
   }
 
-  /// Actualiza el estado de editing en el teclado virtual.
-  void _updateEditingState() {
-    _textInputConnection?.setEditingState(_buildEditingState());
+  /// Procesa entrada desde la barra de símbolos.
+  void insertSymbol(String symbol) {
+    _engine.insertAtCursor(symbol);
+    _syncControllerFromEngine();
+    onTextChanged?.call();
   }
 
-  TextEditingValue _buildEditingState() {
+  /// Sincroniza el controller desde el engine (después de undo/redo/navegación).
+  void _syncControllerFromEngine() {
+    _syncing = true;
     final cursor = _engine.cursor;
     final pos = _engine.pieceTable.lineColToPosition(cursor.line, cursor.column);
-    return TextEditingValue(
+
+    _controller.value = TextEditingValue(
       text: _engine.text,
       selection: TextSelection.collapsed(offset: pos),
-      composing: TextRange.empty,
     );
+    _syncing = false;
   }
 
+  /// Cuando el TextField oculto cambia, sincronizar con el engine.
+  void _onControllerChanged() {
+    if (_syncing) return;
+    _syncing = true;
+
+    final oldText = _engine.text;
+    final newText = _controller.text;
+
+    if (oldText != newText) {
+      // Hacer diff simple: reemplazar todo el texto
+      // (el TextField oculto maneja cambios carácter por carácter,
+      //  pero por simplicidad hacemos replace del texto completo)
+      _engine.loadText(newText);
+
+      // Actualizar cursor desde la selección del controller
+      final sel = _controller.selection;
+      if (sel.isValid && sel.isCollapsed) {
+        final (line, col) = _engine.pieceTable.positionToLineCol(sel.baseOffset);
+        // Mover cursor usando el engine (simplificado)
+        for (int i = 0; i < 100 && _engine.cursor.line < line; i++) {
+          _engine.moveCursorDown();
+        }
+        for (int i = 0; i < 100 && _engine.cursor.column < col; i++) {
+          _engine.moveCursorRight();
+        }
+      }
+    }
+
+    _syncing = false;
+    onTextChanged?.call();
+  }
+
+  /// Conecta al inicio (focus recibido).
+  void connect() {
+    _syncControllerFromEngine();
+  }
+
+  /// Desconecta al perder focus.
+  void disconnect() {}
+
   void dispose() {
-    _textInputConnection?.close();
+    _controller.removeListener(_onControllerChanged);
+    _controller.dispose();
   }
 }
