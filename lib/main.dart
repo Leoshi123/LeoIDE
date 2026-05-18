@@ -10,6 +10,8 @@ import 'editor/completion/models/completion_item.dart';
 import 'editor/completion/models/completion_context.dart';
 import 'editor/highlight/highlight_controller.dart';
 import 'editor/highlight/syntax_lexer.dart';
+import 'editor/lsp/lsp_manager.dart';
+import 'editor/lsp/models/lsp_types.dart';
 import 'editor/widgets/completion_popup.dart';
 import 'editor/models/code_template.dart';
 import 'keyboard/symbol_bar.dart';
@@ -60,6 +62,8 @@ class _EditorScreenState extends State<EditorScreen> {
   late final TextEngine _engine;
   late final TextEditingController _textController;
   late final CompletionEngine _completionEngine;
+  late final LspManager _lspManager;
+  Timer? _lspDebounce;
   bool _syncing = false;
 
   // ── Estado UI ──
@@ -94,9 +98,11 @@ void main() {
     _engine = TextEngine(_defaultCode);
     _completionEngine = CompletionEngine();
     _completionEngine.buildDocument(_defaultCode);
+    _lspManager = LspManager();
     _textController = HighlightController(text: _engine.text);
     _textController.addListener(_onTextChanged);
     _editorFocus.addListener(_onFocusChanged);
+    _initLspForExtension('.dart');
 
     // Manejo de teclas para autocompletado
     _editorFocus.onKeyEvent = (node, event) {
@@ -129,6 +135,15 @@ void main() {
     };
   }
 
+  /// Inicia el servidor LSP para una extensión.
+  void _initLspForExtension(String extension) async {
+    final tempPath = '/tmp/leoide/script$extension';
+    final client = await _lspManager.startForExtension(extension, tempPath);
+    if (client != null) {
+      await client.openDocument(_textController.text);
+    }
+  }
+
   void _onFocusChanged() {
     if (!_editorFocus.hasFocus) {
       _dismissCompletion();
@@ -146,6 +161,12 @@ void main() {
       _engine.loadText(newText);
       _completionEngine.buildDocument(newText);
     }
+
+    // Enviar cambios al LSP (con debounce de 300ms)
+    _lspDebounce?.cancel();
+    _lspDebounce = Timer(const Duration(milliseconds: 300), () {
+      _lspManager.updateDocument(newText);
+    });
 
     final sel = _textController.selection;
     if (sel.isValid && sel.isCollapsed) {
@@ -191,20 +212,122 @@ void main() {
       return;
     }
 
-    // Pedir completaciones al engine
+    final text = _textController.text;
+
+    // Pedir completaciones locales
     final result = _completionEngine.requestCompletions(
-      fullText: _textController.text,
+      fullText: text,
       cursorOffset: sel.baseOffset,
     );
 
-    if (!result.hasItems) {
+    var items = result.sorted;
+
+    // Pedir completaciones LSP y mergear
+    if (_lspManager.isActive) {
+      final pos = sel.baseOffset;
+      // Convertir offset a línea/columna
+      int line = 0, col = 0;
+      for (int i = 0; i < pos && i < text.length; i++) {
+        if (text[i] == '\n') {
+          line++;
+          col = 0;
+        } else {
+          col++;
+        }
+      }
+      _requestLspCompletions(line, col).then((lspItems) {
+        if (lspItems.isNotEmpty && mounted) {
+          _mergeAndShowCompletions(items, lspItems, result.context);
+        }
+      });
+    }
+
+    if (items.isEmpty) {
       _dismissCompletion();
       return;
     }
 
-    _completionItems = result.sorted;
+    _completionItems = items;
     _completionSelectedIndex = 0;
     _showCompletion(result);
+  }
+
+  /// Solicita completaciones al LSP y las mergea.
+  Future<List<CompletionItem>> _requestLspCompletions(
+      int line, int col) async {
+    final lspItems = await _lspManager.requestCompletions(line, col);
+    if (lspItems.isEmpty) return [];
+
+    return lspItems.map((lsp) {
+      CompletionItemKind kind;
+      switch (lsp.kind) {
+        case 1:
+          kind = CompletionItemKind.keyword;
+          break;
+        case 2:
+        case 3:
+          kind = CompletionItemKind.method;
+          break;
+        case 4:
+        case 5:
+          kind = CompletionItemKind.classs;
+          break;
+        case 6:
+          kind = CompletionItemKind.function;
+          break;
+        case 7:
+          kind = CompletionItemKind.variable;
+          break;
+        case 9:
+          kind = CompletionItemKind.module;
+          break;
+        case 14:
+          kind = CompletionItemKind.snippet;
+          break;
+        default:
+          kind = CompletionItemKind.reference;
+      }
+      return CompletionItem(
+        label: lsp.label,
+        insertText: lsp.insertText ?? lsp.label,
+        kind: kind,
+        detail: lsp.detail ?? 'LSP',
+        score: 1.0, // LSP always top
+      );
+    }).toList();
+  }
+
+  /// Mergea resultados LSP con locales (LSP primero).
+  void _mergeAndShowCompletions(List<CompletionItem> local,
+      List<CompletionItem> lsp, CompletionContext context) {
+    // LSP items first, then local (deduplicados por label)
+    final seen = <String>{};
+    final merged = <CompletionItem>[];
+
+    for (final item in lsp) {
+      seen.add(item.label);
+      merged.add(item);
+    }
+    for (final item in local) {
+      if (!seen.contains(item.label)) {
+        merged.add(item);
+      }
+    }
+
+    if (merged.isEmpty) {
+      _dismissCompletion();
+      return;
+    }
+
+    _completionItems = merged.take(15).toList();
+    _completionSelectedIndex = 0;
+
+    if (mounted) {
+      _showCompletion(CompletionResult(
+        items: _completionItems,
+        context: context,
+      ));
+    }
   }
 
   void _showCompletion(CompletionResult result) {
@@ -412,6 +535,7 @@ void main() {
           .setLanguage(_extToConfig(template.extension));
       _textController.text = template.code;
       _syncControllerFromEngine();
+      _initLspForExtension(template.extension);
     });
   }
 
@@ -426,6 +550,7 @@ void main() {
           .setLanguage(LanguageConfig.dart);
       _textController.clear();
       _syncControllerFromEngine();
+      _initLspForExtension('.dart');
     });
   }
 
@@ -586,6 +711,8 @@ void main() {
 
   @override
   void dispose() {
+    _lspDebounce?.cancel();
+    _lspManager.dispose();
     _textController.removeListener(_onTextChanged);
     _textController.dispose();
     _editorFocus.dispose();
