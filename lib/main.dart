@@ -1,11 +1,13 @@
 import 'dart:async';
 import 'dart:io';
 import 'package:flutter/material.dart';
+import 'package:flutter/services.dart';
 import 'editor/engine/text_engine.dart';
 import 'editor/engine/virtual_viewport.dart';
-import 'editor/engine/symtable.dart';
 import 'editor/engine/runner.dart';
-import 'editor/widgets/editor_canvas.dart';
+import 'editor/completion/completion_engine.dart';
+import 'editor/completion/models/completion_item.dart';
+import 'editor/completion/models/completion_context.dart';
 import 'editor/widgets/completion_popup.dart';
 import 'editor/models/code_template.dart';
 import 'keyboard/symbol_bar.dart';
@@ -55,7 +57,7 @@ class _EditorScreenState extends State<EditorScreen> {
   // ── Core ──
   late final TextEngine _engine;
   late final TextEditingController _textController;
-  late final SymTable _symTable;
+  late final CompletionEngine _completionEngine;
   bool _syncing = false;
 
   // ── Estado UI ──
@@ -88,11 +90,41 @@ void main() {
     super.initState();
     _isDark = widget.isDark;
     _engine = TextEngine(_defaultCode);
-    _symTable = SymTable('dart');
-    _symTable.build(_defaultCode);
+    _completionEngine = CompletionEngine();
+    _completionEngine.buildDocument(_defaultCode);
     _textController = TextEditingController(text: _engine.text);
     _textController.addListener(_onTextChanged);
     _editorFocus.addListener(_onFocusChanged);
+
+    // Manejo de teclas para autocompletado
+    _editorFocus.onKeyEvent = (node, event) {
+      if (_completionItems.isEmpty) return KeyEventResult.ignored;
+
+      if (event is KeyDownEvent) {
+        final key = event.logicalKey;
+        // Tab → aceptar completado
+        if (key == LogicalKeyboardKey.tab ||
+            key == LogicalKeyboardKey.enter) {
+          _acceptCompletion();
+          return KeyEventResult.handled;
+        }
+        // ↑ ↓ → navegar
+        if (key == LogicalKeyboardKey.arrowUp) {
+          _completionMoveUp();
+          return KeyEventResult.handled;
+        }
+        if (key == LogicalKeyboardKey.arrowDown) {
+          _completionMoveDown();
+          return KeyEventResult.handled;
+        }
+        // Esc → cerrar
+        if (key == LogicalKeyboardKey.escape) {
+          _dismissCompletion();
+          return KeyEventResult.handled;
+        }
+      }
+      return KeyEventResult.ignored;
+    };
   }
 
   void _onFocusChanged() {
@@ -110,7 +142,7 @@ void main() {
     final newText = _textController.text;
     if (newText != _engine.text) {
       _engine.loadText(newText);
-      _symTable.build(newText);
+      _completionEngine.buildDocument(newText);
     }
 
     final sel = _textController.selection;
@@ -147,6 +179,9 @@ void main() {
 
   // ── Autocompletado ──
 
+  List<CompletionItem> _completionItems = [];
+  int _completionSelectedIndex = 0;
+
   void _updateCompletion() {
     final sel = _textController.selection;
     if (!sel.isValid || !sel.isCollapsed || sel.baseOffset <= 0) {
@@ -154,43 +189,41 @@ void main() {
       return;
     }
 
-    final before = _textController.text.substring(0, sel.baseOffset);
-    final match = RegExp(r'(\w{2,})$').firstMatch(before);
-    if (match == null) {
+    // Pedir completaciones al engine
+    final result = _completionEngine.requestCompletions(
+      fullText: _textController.text,
+      cursorOffset: sel.baseOffset,
+    );
+
+    if (!result.hasItems) {
       _dismissCompletion();
       return;
     }
 
-    final prefix = match.group(1)!;
-    final suggestions = _symTable.query(prefix);
-    if (suggestions.isEmpty) {
-      _dismissCompletion();
-      return;
-    }
-
-    _showCompletion(suggestions, prefix, sel.baseOffset);
+    _completionItems = result.sorted;
+    _completionSelectedIndex = 0;
+    _showCompletion(result);
   }
 
-  void _showCompletion(
-      List<SymEntry> suggestions, String prefix, int cursorPos) {
+  void _showCompletion(CompletionResult result) {
     _dismissCompletion();
 
     _completionOverlay = OverlayEntry(
       builder: (context) => Stack(
         children: [
           Positioned(
-            left: 56, // gutter width
-            top: 100, // posición fija cerca del inicio del editor
+            left: 56,
+            top: 100,
             child: CompositedTransformFollower(
               link: _completionLayerLink,
               targetAnchor: Alignment.topLeft,
               followerAnchor: Alignment.topLeft,
               child: CompletionPopup(
-                symTable: _symTable,
-                currentText: _textController.text,
-                cursorOffset: cursorPos,
-                onSelected: (rest) {
-                  _insertCompletion(rest);
+                items: _completionItems,
+                context: result.context,
+                selectedIndex: _completionSelectedIndex,
+                onSelected: (insertText) {
+                  _insertCompletion(insertText);
                 },
                 onDismiss: _dismissCompletion,
               ),
@@ -203,17 +236,27 @@ void main() {
     Overlay.of(context).insert(_completionOverlay!);
   }
 
-  void _insertCompletion(String rest) {
+  void _insertCompletion(String insertText) {
     final sel = _textController.selection;
     if (!sel.isValid) return;
 
     final pos = sel.baseOffset;
-    final newText = _textController.text.substring(0, pos) +
-        rest +
-        _textController.text.substring(pos);
+    final text = _textController.text;
+
+    // Determinar dónde empieza la palabra actual
+    int wordStart = pos;
+    while (wordStart > 0 && RegExp(r'\w').hasMatch(text[wordStart - 1])) {
+      wordStart--;
+    }
+
+    // Reemplazar la palabra actual con insertText
+    final newText = text.substring(0, wordStart) +
+        insertText +
+        text.substring(pos);
     _textController.value = TextEditingValue(
       text: newText,
-      selection: TextSelection.collapsed(offset: pos + rest.length),
+      selection: TextSelection.collapsed(
+          offset: wordStart + insertText.length),
     );
     _dismissCompletion();
   }
@@ -221,11 +264,46 @@ void main() {
   void _dismissCompletion() {
     _completionOverlay?.remove();
     _completionOverlay = null;
+    _completionItems = [];
+  }
+
+  void _completionMoveUp() {
+    if (_completionItems.isEmpty) return;
+    setState(() {
+      _completionSelectedIndex = (_completionSelectedIndex - 1)
+          .clamp(0, _completionItems.length - 1);
+    });
+    // Reconstruir overlay
+    if (_completionOverlay != null) {
+      final result = _completionEngine.requestCompletions(
+        fullText: _textController.text,
+        cursorOffset: _textController.selection.baseOffset,
+      );
+      if (result.hasItems) _showCompletion(result);
+    }
+  }
+
+  void _completionMoveDown() {
+    if (_completionItems.isEmpty) return;
+    setState(() {
+      _completionSelectedIndex = (_completionSelectedIndex + 1)
+          .clamp(0, _completionItems.length - 1);
+    });
+    if (_completionOverlay != null) {
+      final result = _completionEngine.requestCompletions(
+        fullText: _textController.text,
+        cursorOffset: _textController.selection.baseOffset,
+      );
+      if (result.hasItems) _showCompletion(result);
+    }
   }
 
   void _acceptCompletion() {
-    // Placeholder: el popup de autocompletado maneja su propia selección
-    // En un futuro se conectará con Tab key
+    if (_completionItems.isEmpty) return;
+    if (_completionSelectedIndex < _completionItems.length) {
+      _insertCompletion(
+          _completionItems[_completionSelectedIndex].insertText);
+    }
   }
 
   // ── Plantillas ──
@@ -326,8 +404,8 @@ void main() {
       _engine.loadText(template.code);
       _currentFileName = 'nuevo${template.extension}';
       _currentExtension = template.extension;
-      _symTable.setLanguage(template.extension);
-      _symTable.build(template.code);
+      _completionEngine.setLanguage(_extToLang(template.extension));
+      _completionEngine.buildDocument(template.code);
       _syncControllerFromEngine();
     });
   }
@@ -337,9 +415,37 @@ void main() {
       _engine.loadText('');
       _currentFileName = 'sin_titulo.dart';
       _currentExtension = '.dart';
-      _symTable.build('');
+      _completionEngine.setLanguage('dart');
+      _completionEngine.buildDocument('');
       _syncControllerFromEngine();
     });
+  }
+
+  /// Convierte una extensión de archivo a nombre de lenguaje.
+  String _extToLang(String ext) {
+    switch (ext) {
+      case '.py':
+        return 'python';
+      case '.c':
+        return 'c';
+      case '.cpp':
+      case '.cc':
+      case '.cxx':
+        return 'cpp';
+      case '.js':
+      case '.mjs':
+        return 'javascript';
+      case '.php':
+        return 'php';
+      case '.html':
+      case '.htm':
+        return 'html';
+      case '.css':
+        return 'css';
+      case '.dart':
+      default:
+        return 'dart';
+    }
   }
 
   // ── Run / Stop ──
@@ -433,13 +539,13 @@ void main() {
 
   void _onUndo() {
     _engine.undo();
-    _symTable.build(_engine.text);
+    _completionEngine.buildDocument(_engine.text);
     _syncControllerFromEngine();
   }
 
   void _onRedo() {
     _engine.redo();
-    _symTable.build(_engine.text);
+    _completionEngine.buildDocument(_engine.text);
     _syncControllerFromEngine();
   }
 

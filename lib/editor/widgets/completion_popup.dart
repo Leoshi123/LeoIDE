@@ -1,24 +1,25 @@
 import 'package:flutter/material.dart';
-import '../engine/symtable.dart';
+import '../completion/models/completion_item.dart';
+import '../completion/models/completion_context.dart';
 
-/// Popup de autocompletado que aparece mientras el usuario escribe.
+/// Popup de autocompletado con fuzzy scoring.
 ///
-/// Muestra sugerencias de la SymTable filtradas por el prefijo actual.
-/// Se posiciona cerca del cursor en el editor.
+/// Muestra resultados agrupados por tipo, con colores estilo VS Code.
+/// Navegación con teclado (↑↓), selección con Tab/Enter.
 class CompletionPopup extends StatefulWidget {
-  final SymTable symTable;
-  final String currentText;
-  final int cursorOffset;
+  final List<CompletionItem> items;
+  final CompletionContext context;
   final ValueChanged<String> onSelected;
   final VoidCallback onDismiss;
+  final int selectedIndex;
 
   const CompletionPopup({
     super.key,
-    required this.symTable,
-    required this.currentText,
-    required this.cursorOffset,
+    required this.items,
+    required this.context,
     required this.onSelected,
     required this.onDismiss,
+    this.selectedIndex = 0,
   });
 
   @override
@@ -26,165 +27,231 @@ class CompletionPopup extends StatefulWidget {
 }
 
 class _CompletionPopupState extends State<CompletionPopup> {
-  late List<SymEntry> _suggestions;
-  int _selectedIndex = 0;
-  String _prefix = '';
-
-  @override
-  void initState() {
-    super.initState();
-    _updateSuggestions();
-  }
-
-  @override
-  void didUpdateWidget(CompletionPopup oldWidget) {
-    super.didUpdateWidget(oldWidget);
-    if (oldWidget.currentText != widget.currentText ||
-        oldWidget.cursorOffset != widget.cursorOffset) {
-      _updateSuggestions();
-    }
-  }
-
-  void _updateSuggestions() {
-    _prefix = _extractPrefix();
-    _suggestions = widget.symTable.query(_prefix);
-    _selectedIndex = 0;
-
-    if (_suggestions.isEmpty) {
-      widget.onDismiss();
-    }
-  }
-
-  String _extractPrefix() {
-    if (widget.cursorOffset <= 0) return '';
-
-    final before = widget.currentText.substring(0, widget.cursorOffset);
-    final match = RegExp(r'(\w+)$').firstMatch(before);
-    return match?.group(1) ?? '';
-  }
-
-  void _select(int index) {
-    if (index >= 0 && index < _suggestions.length) {
-      final suggestion = _suggestions[index];
-      final rest = suggestion.name.substring(_prefix.length);
-      widget.onSelected(rest);
-    }
-  }
-
-  void moveUp() {
-    if (_selectedIndex > 0) {
-      setState(() => _selectedIndex--);
-    }
-  }
-
-  void moveDown() {
-    if (_selectedIndex < _suggestions.length - 1) {
-      setState(() => _selectedIndex++);
-    }
-  }
-
-  void selectCurrent() => _select(_selectedIndex);
-
-  bool get hasSuggestions => _suggestions.isNotEmpty;
-
   @override
   Widget build(BuildContext context) {
-    if (_suggestions.isEmpty) return const SizedBox.shrink();
+    if (widget.items.isEmpty) return const SizedBox.shrink();
 
     return Material(
-      elevation: 4,
-      borderRadius: BorderRadius.circular(6),
-      color: const Color(0xFF252526),
+      elevation: 6,
+      borderRadius: BorderRadius.circular(8),
+      color: const Color(0xFF1E1E1E),
       surfaceTintColor: Colors.transparent,
+      shadowColor: Colors.black45,
       child: Container(
-        constraints: const BoxConstraints(maxHeight: 240, maxWidth: 320),
+        constraints: const BoxConstraints(maxHeight: 300, maxWidth: 380),
         decoration: BoxDecoration(
           color: const Color(0xFF252526),
-          border: Border.all(color: const Color(0xFF3C3C3C)),
-          borderRadius: BorderRadius.circular(6),
+          border: Border.all(color: const Color(0xFF454545)),
+          borderRadius: BorderRadius.circular(8),
         ),
-        child: ListView.builder(
-          padding: const EdgeInsets.symmetric(vertical: 4),
-          itemCount: _suggestions.length,
-          itemBuilder: (context, index) {
-            final entry = _suggestions[index];
-            final isSelected = index == _selectedIndex;
-
-            return Material(
-              color: isSelected
-                  ? const Color(0xFF094771)
-                  : Colors.transparent,
-              child: InkWell(
-                onTap: () => _select(index),
-                child: Padding(
-                  padding: const EdgeInsets.symmetric(
-                    horizontal: 12,
-                    vertical: 6,
-                  ),
-                  child: Row(
-                    children: [
-                      // Icono según tipo
-                      Container(
-                        width: 22,
-                        height: 22,
-                        alignment: Alignment.center,
-                        decoration: BoxDecoration(
-                          color: _iconColor(entry.type).withValues(alpha: 0.2),
-                          borderRadius: BorderRadius.circular(4),
-                        ),
-                        child: Text(
-                          entry.icon,
-                          style: TextStyle(
-                            color: _iconColor(entry.type),
-                            fontSize: 12,
-                            fontWeight: FontWeight.bold,
-                            fontFamily: 'monospace',
-                          ),
-                        ),
-                      ),
-                      const SizedBox(width: 10),
-                      // Nombre del símbolo
-                      Expanded(
-                        child: Text(
-                          entry.name,
-                          style: const TextStyle(
-                            color: Color(0xFFD4D4D4),
-                            fontSize: 13,
-                            fontFamily: 'monospace',
-                          ),
-                        ),
-                      ),
-                      // Descripción
-                      Text(
-                        entry.description,
-                        style: TextStyle(
-                          color: const Color(0xFF858585),
-                          fontSize: 11,
-                        ),
-                      ),
-                    ],
-                  ),
-                ),
+        child: Column(
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            // Header: tipo de trigger
+            _buildHeader(),
+            // Lista de sugerencias
+            Flexible(
+              child: ListView.builder(
+                padding: const EdgeInsets.symmetric(vertical: 4),
+                shrinkWrap: true,
+                itemCount: widget.items.length,
+                itemBuilder: (context, index) => _buildItem(index),
               ),
-            );
-          },
+            ),
+            // Footer: info
+            _buildFooter(),
+          ],
         ),
       ),
     );
   }
 
-  Color _iconColor(SymType type) {
-    switch (type) {
-      case SymType.function:
-        return const Color(0xFFDCDCAA); // Amarillo
-      case SymType.keyword:
-        return const Color(0xFF569CD6); // Azul
-      case SymType.className:
-        return const Color(0xFF4EC9B0); // Verde agua
-      case SymType.variable:
-        return const Color(0xFF9CDCFE); // Azul claro
-      case SymType.module:
-        return const Color(0xFFCE9178); // Naranja
+  Widget _buildHeader() {
+    final triggerLabel = switch (widget.context.trigger) {
+      CompletionTrigger.word => 'Autocompletando',
+      CompletionTrigger.dot => 'Miembros',
+      CompletionTrigger.scope => 'Scope',
+      CompletionTrigger.import_ => 'Módulos',
+      CompletionTrigger.manual => 'Sugerencias',
+    };
+
+    return Container(
+      padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 6),
+      decoration: const BoxDecoration(
+        border: Border(bottom: BorderSide(color: Color(0xFF3C3C3C))),
+      ),
+      child: Row(
+        children: [
+          Text(
+            triggerLabel,
+            style: const TextStyle(
+              color: Color(0xFF858585),
+              fontSize: 11,
+              fontWeight: FontWeight.w500,
+            ),
+          ),
+          const Spacer(),
+          if (widget.context.prefix.isNotEmpty)
+            Text(
+              '"${widget.context.prefix}"',
+              style: const TextStyle(
+                color: Color(0xFF569CD6),
+                fontSize: 11,
+                fontFamily: 'monospace',
+              ),
+            ),
+          const SizedBox(width: 8),
+          Text(
+            '${widget.items.length} resultados',
+            style: const TextStyle(
+              color: Color(0xFF5A5A5A),
+              fontSize: 10,
+            ),
+          ),
+        ],
+      ),
+    );
+  }
+
+  Widget _buildItem(int index) {
+    final item = widget.items[index];
+    final isSelected = index == widget.selectedIndex;
+    final iconColor = Color(item.colorHex);
+
+    return Container(
+      color: isSelected ? const Color(0xFF094771) : Colors.transparent,
+      child: InkWell(
+        onTap: () => widget.onSelected(item.insertText),
+        child: Padding(
+          padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 5),
+          child: Row(
+            children: [
+              // Icono
+              Container(
+                width: 24,
+                height: 24,
+                alignment: Alignment.center,
+                decoration: BoxDecoration(
+                  color: iconColor.withValues(alpha: 0.15),
+                  borderRadius: BorderRadius.circular(4),
+                ),
+                child: Text(
+                  item.icon,
+                  style: TextStyle(
+                    color: iconColor,
+                    fontSize: 12,
+                    fontWeight: FontWeight.bold,
+                    fontFamily: 'monospace',
+                  ),
+                ),
+              ),
+              const SizedBox(width: 10),
+              // Label
+              Expanded(
+                child: RichText(
+                  text: _buildHighlightedText(item),
+                  overflow: TextOverflow.ellipsis,
+                ),
+              ),
+              const SizedBox(width: 8),
+              // Detail
+              Text(
+                item.detail,
+                style: const TextStyle(
+                  color: Color(0xFF858585),
+                  fontSize: 11,
+                ),
+              ),
+            ],
+          ),
+        ),
+      ),
+    );
+  }
+
+  /// Resalta el prefijo en el label con negrita.
+  TextSpan _buildHighlightedText(CompletionItem item) {
+    final prefix = widget.context.prefix;
+    if (prefix.isEmpty || !item.label.toLowerCase().startsWith(prefix.toLowerCase())) {
+      return TextSpan(
+        text: item.label,
+        style: const TextStyle(
+          color: Color(0xFFD4D4D4),
+          fontSize: 13,
+          fontFamily: 'monospace',
+        ),
+      );
     }
+
+    return TextSpan(
+      children: [
+        TextSpan(
+          text: item.label.substring(0, prefix.length),
+          style: const TextStyle(
+            color: Color(0xFFD4D4D4),
+            fontSize: 13,
+            fontFamily: 'monospace',
+            fontWeight: FontWeight.bold,
+          ),
+        ),
+        TextSpan(
+          text: item.label.substring(prefix.length),
+          style: const TextStyle(
+            color: Color(0xFF858585),
+            fontSize: 13,
+            fontFamily: 'monospace',
+          ),
+        ),
+      ],
+    );
+  }
+
+  Widget _buildFooter() {
+    return Container(
+      padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 4),
+      decoration: const BoxDecoration(
+        border: Border(top: BorderSide(color: Color(0xFF3C3C3C))),
+      ),
+      child: Row(
+        children: [
+          _keyHint('Tab', 'insertar'),
+          const SizedBox(width: 12),
+          _keyHint('↑↓', 'navegar'),
+          const SizedBox(width: 12),
+          _keyHint('Esc', 'cerrar'),
+        ],
+      ),
+    );
+  }
+
+  Widget _keyHint(String key, String action) {
+    return Row(
+      mainAxisSize: MainAxisSize.min,
+      children: [
+        Container(
+          padding: const EdgeInsets.symmetric(horizontal: 4, vertical: 1),
+          decoration: BoxDecoration(
+            color: const Color(0xFF3C3C3C),
+            borderRadius: BorderRadius.circular(3),
+          ),
+          child: Text(
+            key,
+            style: const TextStyle(
+              color: Color(0xFF858585),
+              fontSize: 10,
+              fontFamily: 'monospace',
+            ),
+          ),
+        ),
+        const SizedBox(width: 4),
+        Text(
+          action,
+          style: const TextStyle(
+            color: Color(0xFF5A5A5A),
+            fontSize: 10,
+          ),
+        ),
+      ],
+    );
   }
 }
