@@ -8,6 +8,8 @@ import 'editor/engine/runner.dart';
 import 'editor/completion/completion_engine.dart';
 import 'editor/completion/models/completion_item.dart';
 import 'editor/completion/models/completion_context.dart';
+import 'editor/highlight/highlight_controller.dart';
+import 'editor/highlight/syntax_lexer.dart';
 import 'editor/widgets/completion_popup.dart';
 import 'editor/models/code_template.dart';
 import 'keyboard/symbol_bar.dart';
@@ -92,7 +94,7 @@ void main() {
     _engine = TextEngine(_defaultCode);
     _completionEngine = CompletionEngine();
     _completionEngine.buildDocument(_defaultCode);
-    _textController = TextEditingController(text: _engine.text);
+    _textController = HighlightController(text: _engine.text);
     _textController.addListener(_onTextChanged);
     _editorFocus.addListener(_onFocusChanged);
 
@@ -406,6 +408,9 @@ void main() {
       _currentExtension = template.extension;
       _completionEngine.setLanguage(_extToLang(template.extension));
       _completionEngine.buildDocument(template.code);
+      (_textController as HighlightController)
+          .setLanguage(_extToConfig(template.extension));
+      _textController.text = template.code;
       _syncControllerFromEngine();
     });
   }
@@ -417,11 +422,14 @@ void main() {
       _currentExtension = '.dart';
       _completionEngine.setLanguage('dart');
       _completionEngine.buildDocument('');
+      (_textController as HighlightController)
+          .setLanguage(LanguageConfig.dart);
+      _textController.clear();
       _syncControllerFromEngine();
     });
   }
 
-  /// Convierte una extensión de archivo a nombre de lenguaje.
+  /// Convierte extensión → nombre de lenguaje (para completion).
   String _extToLang(String ext) {
     switch (ext) {
       case '.py':
@@ -445,6 +453,33 @@ void main() {
       case '.dart':
       default:
         return 'dart';
+    }
+  }
+
+  /// Convierte extensión → LanguageConfig (para highlighting).
+  LanguageConfig _extToConfig(String ext) {
+    switch (ext) {
+      case '.py':
+        return LanguageConfig.python;
+      case '.c':
+        return LanguageConfig.c;
+      case '.cpp':
+      case '.cc':
+      case '.cxx':
+        return LanguageConfig.cpp;
+      case '.js':
+      case '.mjs':
+        return LanguageConfig.javascript;
+      case '.php':
+        return LanguageConfig.php;
+      case '.html':
+      case '.htm':
+        return LanguageConfig.html;
+      case '.css':
+        return LanguageConfig.css;
+      case '.dart':
+      default:
+        return LanguageConfig.dart;
     }
   }
 
