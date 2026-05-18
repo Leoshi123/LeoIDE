@@ -73,10 +73,9 @@ class _EditorCanvasState extends State<EditorCanvas>
                 textColor: widget.textColor,
                 lineNumberColor: widget.lineNumberColor,
                 lineNumberBgColor: widget.lineNumberBgColor,
-                elapsedSeconds: _blinkController.lastElapsedDuration?.inMilliseconds
+                elapsedSeconds: (_blinkController.lastElapsedDuration?.inMilliseconds ?? 0)
                         .toDouble() /
-                    1000.0 ??
-                    0.0,
+                    1000.0,
               ),
               size: Size.infinite,
             ),

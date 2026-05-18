@@ -32,9 +32,11 @@ void main() {
     });
 
     test('inserta en medio', () {
+      // 'homundo' → h(0) o(1) m(2) u(3) n(4) d(5) o(6)
+      // insertar 'l' en pos 3 → h(0) o(1) m(2) l(3) u(4) n(5) d(6) o(7)
       final pt = PieceTable('homundo');
       pt.insert(3, 'l');
-      expect(pt.text, 'holmundo');
+      expect(pt.text, 'homlundo');
     });
 
     test('inserta caracteres especiales', () {
