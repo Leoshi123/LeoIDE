@@ -1,16 +1,26 @@
 import 'package:flutter/material.dart';
 import 'syntax_lexer.dart';
 import 'syntax_highlighter.dart';
+import '../lsp/models/lsp_types.dart';
 
 /// TextEditingController que resalta sintaxis en tiempo real.
 ///
-/// Overridea [buildTextSpan] para devolver TextSpan coloreados
-/// en lugar del texto plano default.
+/// Además mantiene diagnostics del LSP para que el editor
+/// pueda mostrar indicadores de error.
 class HighlightController extends TextEditingController {
   LanguageConfig _config;
   SyntaxLexer? _lastLexer;
   SyntaxHighlighter? _lastHighlighter;
   String _lastText = '';
+
+  /// Diagnostics activos del LSP (errores, warnings, etc).
+  List<LspDiagnostic> diagnostics = const [];
+
+  /// Líneas que tienen al menos un error (severity=1).
+  Set<int> errorLines = {};
+
+  /// Líneas que tienen al menos un warning (severity=2).
+  Set<int> warningLines = {};
 
   HighlightController({String? text, LanguageConfig? config})
       : _config = config ?? LanguageConfig.dart,
@@ -20,6 +30,25 @@ class HighlightController extends TextEditingController {
   void setLanguage(LanguageConfig config) {
     _config = config;
     _lastText = '';
+    notifyListeners();
+  }
+
+  /// Actualiza diagnostics y refresca el editor.
+  void updateDiagnostics(List<LspDiagnostic> diags) {
+    diagnostics = diags;
+    errorLines = {};
+    warningLines = {};
+
+    for (final d in diags) {
+      switch (d.severity) {
+        case DiagnosticSeverity.error:
+          errorLines.add(d.startLine);
+        case DiagnosticSeverity.warning:
+          warningLines.add(d.startLine);
+        default:
+          break;
+      }
+    }
     notifyListeners();
   }
 
@@ -46,13 +75,11 @@ class HighlightController extends TextEditingController {
       final tokens = _lastLexer!.tokenize();
       final span = _lastHighlighter!.highlight(text, tokens);
 
-      // Aplicar el style base del TextField (tamaño, font, etc.)
       return TextSpan(
         style: style,
         children: span.children,
       );
     } catch (_) {
-      // Fallback: texto plano si algo falla
       return TextSpan(text: text, style: style);
     }
   }

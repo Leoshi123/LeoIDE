@@ -2,12 +2,21 @@ import 'dart:io';
 import 'lsp_client.dart';
 import 'models/lsp_types.dart';
 
+/// Callback para cambios en diagnostics.
+typedef DiagnosticsChangedCallback = void Function();
+
 /// Orquestador de servidores LSP.
 ///
 /// Decide qué servidor ejecutar según el lenguaje y gestiona
 /// el ciclo de vida (start/stop por cambio de archivo).
 class LspManager {
   LspClient? _currentClient;
+
+  /// Últimos diagnostics recibidos del servidor activo.
+  List<LspDiagnostic> diagnostics = [];
+
+  /// Callback notificado cuando llegan nuevos diagnostics.
+  DiagnosticsChangedCallback? onDiagnosticsChanged;
 
   /// Servidor actualmente activo.
   LspClient? get current => _currentClient;
@@ -29,6 +38,7 @@ class LspManager {
       args: config.args,
       languageId: config.languageId,
       filePath: filePath,
+      onDiagnostics: _onDiagnostics,
     );
 
     try {
@@ -59,6 +69,14 @@ class LspManager {
       int line, int character) async {
     if (_currentClient == null || !_currentClient!.isReady) return [];
     return _currentClient!.requestCompletions(line, character);
+  }
+
+  /// Maneja diagnostics recibidos del servidor LSP.
+  void _onDiagnostics(List<Map<String, dynamic>> rawDiagnostics) {
+    diagnostics = rawDiagnostics
+        .map((d) => LspDiagnostic.fromJson(d))
+        .toList();
+    onDiagnosticsChanged?.call();
   }
 
   /// Detiene el servidor actual.

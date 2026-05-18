@@ -124,3 +124,72 @@ const Map<String, String> extensionToLspLanguage = {
   '.htm': 'html',
   '.css': 'css',
 };
+
+// ── Diagnostics ──
+
+/// Severidad de un diagnóstico LSP.
+enum DiagnosticSeverity {
+  error(1),
+  warning(2),
+  info(3),
+  hint(4);
+
+  final int value;
+  const DiagnosticSeverity(this.value);
+
+  static DiagnosticSeverity fromValue(int value) {
+    switch (value) {
+      case 1:
+        return DiagnosticSeverity.error;
+      case 2:
+        return DiagnosticSeverity.warning;
+      case 3:
+        return DiagnosticSeverity.info;
+      case 4:
+        return DiagnosticSeverity.hint;
+      default:
+        return DiagnosticSeverity.info;
+    }
+  }
+}
+
+/// Diagnóstico de un servidor LSP (error, warning, info).
+class LspDiagnostic {
+  final int startLine;
+  final int startCol;
+  final int endLine;
+  final int endCol;
+  final String message;
+  final DiagnosticSeverity severity;
+  final String? code;
+  final String? source;
+
+  const LspDiagnostic({
+    required this.startLine,
+    required this.startCol,
+    required this.endLine,
+    required this.endCol,
+    required this.message,
+    required this.severity,
+    this.code,
+    this.source,
+  });
+
+  factory LspDiagnostic.fromJson(Map<String, dynamic> json) {
+    final range = json['range'] as Map<String, dynamic>;
+    final start = range['start'] as Map<String, dynamic>;
+    final end = range['end'] as Map<String, dynamic>;
+    final severityValue = json['severity'] as int? ?? 1;
+
+    return LspDiagnostic(
+      startLine: start['line'] as int,
+      startCol: start['character'] as int,
+      endLine: end['line'] as int,
+      endCol: end['character'] as int,
+      message: json['message'] as String? ?? '',
+      severity: DiagnosticSeverity.fromValue(severityValue),
+      code: json['code'] as String?,
+      source: json['source'] as String?,
+    );
+  }
+}

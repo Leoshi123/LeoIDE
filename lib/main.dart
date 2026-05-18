@@ -74,6 +74,7 @@ class _EditorScreenState extends State<EditorScreen> {
   bool _showTerminal = false;
   final List<String> _terminalLog = [];
   bool _isRunning = false;
+  bool _diagnosticsExpanded = false;
 
   // ── Autocompletado ──
   final LayerLink _completionLayerLink = LayerLink();
@@ -100,6 +101,7 @@ void main() {
     _completionEngine = CompletionEngine();
     _completionEngine.buildDocument(_defaultCode);
     _lspManager = LspManager();
+    _lspManager.onDiagnosticsChanged = _onLspDiagnostics;
     _textController = HighlightController(text: _engine.text);
     _textController.addListener(_onTextChanged);
     _editorFocus.addListener(_onFocusChanged);
@@ -143,6 +145,30 @@ void main() {
     if (client != null) {
       await client.openDocument(_textController.text);
     }
+  }
+
+  void _onLspDiagnostics() {
+    if (!mounted) return;
+    final diagnostics = _lspManager.diagnostics;
+    // Actualizar el HighlightController con los diagnostics
+    (_textController as HighlightController).updateDiagnostics(diagnostics);
+    setState(() {
+      // Propagar errores/warnings a la UI
+    });
+  }
+
+  /// Desplaza el editor a la línea especificada (0-indexed).
+  void _scrollToDiagnostic(int line) {
+    // Calcular offset de la línea
+    final text = _textController.text;
+    int offset = 0;
+    for (int i = 0; i < line && offset < text.length; i++) {
+      final nextNewline = text.indexOf('\n', offset);
+      if (nextNewline == -1) break;
+      offset = nextNewline + 1;
+    }
+    _textController.selection = TextSelection.collapsed(offset: offset);
+    setState(() => _diagnosticsExpanded = false);
   }
 
   void _onFocusChanged() {
@@ -825,6 +851,10 @@ void main() {
                         text: _textController.text,
                         isDark: _isDark,
                         gutterTextColor: gutterText,
+                        errorLines: (_textController as HighlightController)
+                            .errorLines,
+                        warningLines: (_textController as HighlightController)
+                            .warningLines,
                       ),
                     ),
                   ),
@@ -871,6 +901,14 @@ void main() {
             ),
           ),
 
+          // Diagnostics bar
+          _DiagnosticsBar(
+            diagnostics: (_textController as HighlightController).diagnostics,
+            isDark: _isDark,
+            onTap: () => setState(() => _diagnosticsExpanded = !_diagnosticsExpanded),
+            onProblemTap: (line) => _scrollToDiagnostic(line),
+          ),
+
           // Terminal (panel de salida)
           if (_showTerminal)
             _TerminalPanel(
@@ -909,11 +947,15 @@ class _LineNumbers extends StatelessWidget {
   final String text;
   final bool isDark;
   final Color gutterTextColor;
+  final Set<int> errorLines;
+  final Set<int> warningLines;
 
   const _LineNumbers({
     required this.text,
     required this.isDark,
     required this.gutterTextColor,
+    required this.errorLines,
+    required this.warningLines,
   });
 
   @override
@@ -926,17 +968,149 @@ class _LineNumbers extends StatelessWidget {
       itemCount: visible,
       itemExtent: 21.0, // fontSize 14 * height 1.5
       itemBuilder: (context, i) {
-        return Text(
-          '${i + 1}',
-          textAlign: TextAlign.right,
-          style: TextStyle(
-            fontFamily: 'monospace',
-            fontSize: 12.0,
-            height: 1.75,
-            color: gutterTextColor,
-          ),
+        final lineNum = i; // 0-indexed
+        return Row(
+          children: [
+            // Indicador de error/warning (círculo de 6px)
+            if (errorLines.contains(lineNum))
+              Container(
+                width: 6,
+                height: 6,
+                margin: const EdgeInsets.only(right: 4),
+                decoration: const BoxDecoration(
+                  shape: BoxShape.circle,
+                  color: Color(0xFFF14C4C),
+                ),
+              )
+            else if (warningLines.contains(lineNum))
+              Container(
+                width: 6,
+                height: 6,
+                margin: const EdgeInsets.only(right: 4),
+                decoration: const BoxDecoration(
+                  shape: BoxShape.circle,
+                  color: Color(0xFFFFCC00),
+                ),
+              )
+            else
+              const SizedBox(width: 10),
+            // Número de línea
+            Text(
+              '${i + 1}',
+              textAlign: TextAlign.right,
+              style: TextStyle(
+                fontFamily: 'monospace',
+                fontSize: 12.0,
+                height: 1.75,
+                color: gutterTextColor,
+              ),
+            ),
+          ],
         );
       },
+    );
+  }
+}
+
+/// Barra de diagnostics del LSP (errores, warnings).
+class _DiagnosticsBar extends StatelessWidget {
+  final List<LspDiagnostic> diagnostics;
+  final bool isDark;
+  final VoidCallback onTap;
+  final void Function(int line) onProblemTap;
+
+  const _DiagnosticsBar({
+    required this.diagnostics,
+    required this.isDark,
+    required this.onTap,
+    required this.onProblemTap,
+  });
+
+  @override
+  Widget build(BuildContext context) {
+    if (diagnostics.isEmpty) return const SizedBox.shrink();
+
+    final errors = diagnostics.where((d) => d.severity == DiagnosticSeverity.error).length;
+    final warnings = diagnostics.where((d) => d.severity == DiagnosticSeverity.warning).length;
+    final others = diagnostics.length - errors - warnings;
+
+    return GestureDetector(
+      onTap: onTap,
+      child: Container(
+        height: 28,
+        padding: const EdgeInsets.symmetric(horizontal: 12),
+        color: isDark ? const Color(0xFF2D2D2D) : const Color(0xFFE8E8E8),
+        child: Row(
+          children: [
+            // Contador de errores
+            if (errors > 0)
+              _Badge(
+                count: errors,
+                color: const Color(0xFFF14C4C),
+                label: 'error${errors != 1 ? 'es' : ''}',
+              ),
+            if (warnings > 0)
+              _Badge(
+                count: warnings,
+                color: const Color(0xFFFFCC00),
+                label: 'warning${warnings != 1 ? 's' : ''}',
+              ),
+            if (others > 0)
+              _Badge(
+                count: others,
+                color: const Color(0xFF75BEFF),
+                label: 'info${others != 1 ? 's' : ''}',
+              ),
+            const Spacer(),
+            Icon(
+              Icons.error_outline,
+              size: 14,
+              color: isDark ? const Color(0xFF858585) : const Color(0xFF666666),
+            ),
+          ],
+        ),
+      ),
+    );
+  }
+}
+
+class _Badge extends StatelessWidget {
+  final int count;
+  final Color color;
+  final String label;
+
+  const _Badge({
+    required this.count,
+    required this.color,
+    required this.label,
+  });
+
+  @override
+  Widget build(BuildContext context) {
+    return Padding(
+      padding: const EdgeInsets.only(right: 12),
+      child: Row(
+        mainAxisSize: MainAxisSize.min,
+        children: [
+          Container(
+            width: 8,
+            height: 8,
+            decoration: BoxDecoration(
+              shape: BoxShape.circle,
+              color: color,
+            ),
+          ),
+          const SizedBox(width: 4),
+          Text(
+            '$count $label',
+            style: TextStyle(
+              fontSize: 11,
+              fontWeight: FontWeight.w500,
+              color: color,
+            ),
+          ),
+        ],
+      ),
     );
   }
 }
