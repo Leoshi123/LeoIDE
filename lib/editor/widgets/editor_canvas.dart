@@ -7,8 +7,9 @@ import 'cursor_painter.dart';
 
 /// Canvas personalizado que renderiza el editor de código.
 ///
-/// Usa Focus.onKeyEvent para teclado físico (Linux/desktop) y un
-/// TextField oculto para el teclado virtual (Android).
+/// Usa Focus.onKeyEvent para capturar el teclado físico (Linux/desktop).
+/// Sin TextField oculto, sin TextEditingController — cada tecla se traduce
+/// directamente a una operación del TextEngine.
 class EditorCanvas extends StatefulWidget {
   final TextEngine engine;
   final VirtualViewport viewport;
@@ -51,11 +52,7 @@ class _EditorCanvasState extends State<EditorCanvas>
       vsync: this,
       duration: const Duration(seconds: 1),
     )..repeat();
-    _focusNode = FocusNode();
-    _setupInputHandler();
-  }
-
-  void _setupInputHandler() {
+    _focusNode = FocusNode(debugLabel: 'LeoEditorFocus');
     _inputHandler = EditorInputHandler(
       engine: widget.engine,
       focusNode: _focusNode,
@@ -84,8 +81,9 @@ class _EditorCanvasState extends State<EditorCanvas>
     widget.viewport.totalLines = widget.engine.lineCount;
     double maxWidth = 0;
     for (int i = 0; i < widget.engine.lineCount; i++) {
-      final lineLen = widget.engine.lineAt(i).length.toDouble();
-      maxWidth = maxWidth > lineLen ? maxWidth : lineLen;
+      maxWidth = maxWidth > widget.engine.lineAt(i).length
+          ? maxWidth
+          : widget.engine.lineAt(i).length.toDouble();
     }
     widget.viewport.maxLineWidth = maxWidth * widget.viewport.charWidth;
   }
@@ -109,67 +107,32 @@ class _EditorCanvasState extends State<EditorCanvas>
       },
       child: GestureDetector(
         onTapDown: (details) => _handleTap(details.localPosition),
-        onPanStart: (_) {},
         onPanUpdate: (details) {
           widget.viewport.scrollBy(-details.delta.dx, -details.delta.dy);
           setState(() {});
         },
-        onPanEnd: (_) {},
-        child: Stack(
-          children: [
-            // Canvas del editor
-            ClipRect(
-              child: AnimatedBuilder(
-                animation: _blinkController,
-                builder: (context, _) {
-                  return CustomPaint(
-                    painter: _EditorPainter(
-                      engine: widget.engine,
-                      viewport: widget.viewport,
-                      cursorPainter: _cursorPainter,
-                      backgroundColor: widget.backgroundColor,
-                      textColor: widget.textColor,
-                      lineNumberColor: widget.lineNumberColor,
-                      lineNumberBgColor: widget.lineNumberBgColor,
-                      elapsedSeconds: (_blinkController.lastElapsedDuration
-                                  ?.inMilliseconds ??
-                              0)
-                          .toDouble() /
-                      1000.0,
-                    ),
-                    size: Size.infinite,
-                  );
-                },
-              ),
-            ),
-            // TextField oculto para teclado virtual (Android)
-            Positioned(
-              left: -1,
-              top: -1,
-              child: SizedBox(
-                width: 1,
-                height: 1,
-                child: TextField(
-                  controller: _inputHandler?.controller,
-                  focusNode: _focusNode,
-                  autofocus: true,
-                  enableSuggestions: false,
-                  autocorrect: false,
-                  style: const TextStyle(
-                    fontSize: 1,
-                    color: Color(0x00000000),
-                  ),
-                  decoration: const InputDecoration(
-                    border: InputBorder.none,
-                    isDense: true,
-                    contentPadding: EdgeInsets.zero,
-                  ),
-                  // En Linux, el teclado físico se maneja vía Focus.onKeyEvent
-                  // En móvil, este TextField capturará el teclado virtual
+        child: ClipRect(
+          child: AnimatedBuilder(
+            animation: _blinkController,
+            builder: (context, _) {
+              return CustomPaint(
+                painter: _EditorPainter(
+                  engine: widget.engine,
+                  viewport: widget.viewport,
+                  cursorPainter: _cursorPainter,
+                  backgroundColor: widget.backgroundColor,
+                  textColor: widget.textColor,
+                  lineNumberColor: widget.lineNumberColor,
+                  lineNumberBgColor: widget.lineNumberBgColor,
+                  elapsedSeconds:
+                      (_blinkController.lastElapsedDuration?.inMilliseconds ?? 0)
+                              .toDouble() /
+                          1000.0,
                 ),
-              ),
-            ),
-          ],
+                size: Size.infinite,
+              );
+            },
+          ),
         ),
       ),
     );
@@ -186,7 +149,6 @@ class _EditorCanvasState extends State<EditorCanvas>
       lineHeight: widget.viewport.lineHeight,
     );
     _cursorPainter.resetBlink();
-    _inputHandler?.connect();
     setState(() {});
   }
 }
