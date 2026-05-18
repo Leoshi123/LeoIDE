@@ -81,7 +81,7 @@ class LspManager {
       case '.dart':
         return const _LspServerConfig(
           executable: 'dart',
-          args: ['analizar', '--lsp'],
+          args: ['/opt/dart-sdk/bin/snapshots/analysis_server.dart.snapshot', '--lsp'],
           languageId: 'dart',
         );
       case '.c':

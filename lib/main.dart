@@ -14,6 +14,7 @@ import 'editor/lsp/lsp_manager.dart';
 import 'editor/lsp/models/lsp_types.dart';
 import 'editor/widgets/completion_popup.dart';
 import 'editor/models/code_template.dart';
+import 'editor/engine/language_detector.dart';
 import 'keyboard/symbol_bar.dart';
 import 'theme/app_theme.dart';
 
@@ -619,7 +620,17 @@ void main() {
       return;
     }
 
-    final runner = runnerForExtension(_currentExtension);
+    // Detectar lenguaje por contenido
+    final detected = LanguageDetector.detect(code,
+        hintExtension: _currentExtension);
+    String ext = _currentExtension;
+    if (detected.isValid && detected.extension != _currentExtension) {
+      _logToTerminal(
+          '🔍 Detectado ${detected.language} por contenido del código');
+      ext = detected.extension;
+    }
+
+    final runner = runnerForExtension(ext);
     if (runner == null) {
       _logToTerminal('❌ No hay runner disponible para $_currentExtension');
       _logToTerminal('   Lenguajes soportados: .py, .c, .cpp, .js, .php, .dart, .html, .css');
