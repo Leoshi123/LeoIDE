@@ -66,7 +66,7 @@ class LanguageDetector {
     _Pattern(RegExp(r'^\s*from\s+\w+\s+import\s'), 3, 'from import'),
     _Pattern(RegExp(r'^\s*import\s+\w+'), 2, 'import'),
     _Pattern(RegExp(r'^\s*@\w+'), 2, 'decorator'),
-    _Pattern(RegExp(r'^\s*print\s*\('), 1, 'print('),
+    _Pattern(RegExp(r'^\s*print\s*\('), 3, 'print('),
     _Pattern(RegExp(r'^\s*yield\s'), 4, 'yield'),
     _Pattern(RegExp(r'^\s*lambda\s'), 3, 'lambda'),
     _Pattern(RegExp(r'^\s*async\s+def\s'), 3, 'async def'),
@@ -74,6 +74,7 @@ class LanguageDetector {
     _Pattern(RegExp(r'^\s*assert\s'), 2, 'assert'),
     _Pattern(RegExp(r'^\s*del\s'), 2, 'del'),
     _Pattern(RegExp(r'^\s*pass\s*$'), 1, 'pass'),
+    _Pattern(RegExp(r"""^\s*["'][^"']{3,}["']\s*$"""), 2, 'standalone string'),
   ];
 
   static final List<_Pattern> _dartPatterns = [

@@ -253,5 +253,13 @@ for i in range(5):
       expect(result.language, 'python');
       expect(result.isValid, isTrue);
     });
+
+    test('print suelto en .dart detecta Python', () {
+      // Este es el caso exacto que falló: print("Hello") sin main()
+      final code = 'print("Hello, LeoIDE!")';
+      final result = LanguageDetector.detect(code, hintExtension: '.dart');
+      expect(result.language, 'python');
+      expect(result.isValid, isTrue);
+    });
   });
 }
