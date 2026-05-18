@@ -870,7 +870,7 @@ class _TerminalPanel extends StatelessWidget {
                 : ListView.builder(
                     padding: const EdgeInsets.all(8),
                     itemCount: logs.length,
-                    itemBuilder: (_, i) => Text(
+                    itemBuilder: (_, i) => SelectableText(
                       logs[i],
                       style: TextStyle(
                         fontFamily: 'monospace',
