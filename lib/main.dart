@@ -13,6 +13,7 @@ import 'editor/highlight/syntax_lexer.dart';
 import 'editor/lsp/lsp_manager.dart';
 import 'editor/lsp/models/lsp_types.dart';
 import 'editor/widgets/completion_popup.dart';
+import 'editor/widgets/file_explorer.dart';
 import 'editor/models/code_template.dart';
 import 'editor/engine/language_detector.dart';
 import 'editor/engine/file_manager.dart';
@@ -112,12 +113,20 @@ void main() {
     _editorFocus.addListener(_onFocusChanged);
     _initLspForExtension('.dart');
 
-    // Manejo de teclas para autocompletado
+    // Manejo de teclas para autocompletado y atajos
     _editorFocus.onKeyEvent = (node, event) {
-      if (_completionItems.isEmpty) return KeyEventResult.ignored;
+      // Ctrl+S → Guardar (sin importar el tipo exacto del evento)
+      if (event.logicalKey == LogicalKeyboardKey.keyS &&
+          HardwareKeyboard.instance.isControlPressed) {
+        _onSave();
+        return KeyEventResult.handled;
+      }
 
       if (event is KeyDownEvent) {
         final key = event.logicalKey;
+
+        if (_completionItems.isEmpty) return KeyEventResult.ignored;
+
         // Tab → aceptar completado
         if (key == LogicalKeyboardKey.tab ||
             key == LogicalKeyboardKey.enter) {
@@ -138,6 +147,8 @@ void main() {
           _dismissCompletion();
           return KeyEventResult.handled;
         }
+
+        return KeyEventResult.ignored;
       }
       return KeyEventResult.ignored;
     };
@@ -938,12 +949,35 @@ void main() {
         _isDark ? const Color(0xFF858585) : const Color(0xFF999999);
 
     return Scaffold(
+      drawer: Drawer(
+        width: 240,
+        child: FileExplorer(
+          fileManager: _fileManager,
+          isDark: _isDark,
+          onFileTap: (fileName) {
+            Navigator.pop(context);
+            _doOpen(fileName);
+          },
+          onFileDelete: (fileName) {
+            _fileManager.deleteFile(fileName);
+            _logToTerminal('🗑️ Eliminado: $fileName');
+          },
+        ),
+      ),
       appBar: AppBar(
         title: Text(
           _currentFileName,
           style: const TextStyle(fontFamily: 'monospace', fontSize: 14),
         ),
         actions: [
+          // Menú explorador
+          Builder(
+            builder: (ctx) => IconButton(
+              icon: const Icon(Icons.menu, size: 20),
+              tooltip: 'Explorador de archivos',
+              onPressed: () => Scaffold.of(ctx).openDrawer(),
+            ),
+          ),
           IconButton(
             icon: const Icon(Icons.add, size: 20),
             tooltip: 'Nuevo archivo (plantillas)',
