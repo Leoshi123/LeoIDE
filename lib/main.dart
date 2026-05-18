@@ -642,15 +642,16 @@ void main() {
               tooltip: 'Detener ejecución',
               onPressed: _onStop,
             ),
-          // Botón terminal
-          IconButton(
-            icon: Icon(
-              _showTerminal ? Icons.terminal : Icons.terminal_outlined,
-              size: 20,
-            ),
-            tooltip: 'Terminal',
-            onPressed: () => setState(() => _showTerminal = !_showTerminal),
+        // ── Botón Run ──
+        // Botón terminal
+        IconButton(
+          icon: Icon(
+            _showTerminal ? Icons.terminal : Icons.terminal_outlined,
+            size: 20,
           ),
+          tooltip: 'Terminal',
+          onPressed: () => setState(() => _showTerminal = !_showTerminal),
+        ),
           IconButton(
             icon: Icon(
               _isDark ? Icons.light_mode : Icons.dark_mode,
@@ -814,6 +815,17 @@ class _TerminalPanel extends StatelessWidget {
     required this.onClear,
   });
 
+  void _copyAll(BuildContext context) {
+    final text = logs.join('\n');
+    Clipboard.setData(ClipboardData(text: text));
+    ScaffoldMessenger.of(context).showSnackBar(
+      const SnackBar(
+        content: Text('✅ Terminal copiado al portapapeles'),
+        duration: Duration(seconds: 1),
+      ),
+    );
+  }
+
   @override
   Widget build(BuildContext context) {
     return Container(
@@ -839,6 +851,20 @@ class _TerminalPanel extends StatelessWidget {
                   ),
                 ),
                 const Spacer(),
+                // Copiar todo
+                if (logs.isNotEmpty) ...[
+                  GestureDetector(
+                    onTap: () => _copyAll(context),
+                    child: Icon(
+                      Icons.copy,
+                      size: 14,
+                      color: isDark
+                          ? const Color(0xFF858585)
+                          : const Color(0xFF666666),
+                    ),
+                  ),
+                  const SizedBox(width: 12),
+                ],
                 GestureDetector(
                   onTap: onClear,
                   child: Icon(
@@ -867,11 +893,10 @@ class _TerminalPanel extends StatelessWidget {
                       ),
                     ),
                   )
-                : ListView.builder(
+                : SingleChildScrollView(
                     padding: const EdgeInsets.all(8),
-                    itemCount: logs.length,
-                    itemBuilder: (_, i) => SelectableText(
-                      logs[i],
+                    child: SelectableText(
+                      logs.join('\n'),
                       style: TextStyle(
                         fontFamily: 'monospace',
                         fontSize: 13,
