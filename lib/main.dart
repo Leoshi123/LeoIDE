@@ -15,6 +15,7 @@ import 'editor/lsp/models/lsp_types.dart';
 import 'editor/widgets/completion_popup.dart';
 import 'editor/models/code_template.dart';
 import 'editor/engine/language_detector.dart';
+import 'editor/engine/file_manager.dart';
 import 'keyboard/symbol_bar.dart';
 import 'theme/app_theme.dart';
 
@@ -64,6 +65,7 @@ class _EditorScreenState extends State<EditorScreen> {
   late final TextEditingController _textController;
   late final CompletionEngine _completionEngine;
   late final LspManager _lspManager;
+  late final FileManager _fileManager;
   Timer? _lspDebounce;
   bool _syncing = false;
 
@@ -102,6 +104,9 @@ void main() {
     _completionEngine.buildDocument(_defaultCode);
     _lspManager = LspManager();
     _lspManager.onDiagnosticsChanged = _onLspDiagnostics;
+    _fileManager = FileManager(
+      projectRoot: '${Platform.environment['HOME'] ?? '/tmp'}/LeoIDE',
+    );
     _textController = HighlightController(text: _engine.text);
     _textController.addListener(_onTextChanged);
     _editorFocus.addListener(_onFocusChanged);
@@ -581,6 +586,171 @@ void main() {
     });
   }
 
+  // ── File Persistence ──
+
+  /// Guarda el archivo actual.
+  void _onSave() {
+    if (_currentFileName == 'sin_titulo.dart') {
+      _showSaveAsDialog();
+    } else {
+      _doSave(_currentFileName);
+    }
+  }
+
+  /// Guarda con nombre específico.
+  Future<void> _doSave(String fileName) async {
+    try {
+      await _fileManager.saveFile(fileName, _textController.text);
+      setState(() => _currentFileName = fileName);
+      _logToTerminal('💾 Guardado: $fileName');
+    } catch (e) {
+      _logToTerminal('❌ Error al guardar: $e');
+    }
+  }
+
+  /// Muestra diálogo para guardar con nombre.
+  void _showSaveAsDialog() {
+    final controller = TextEditingController(text: _currentFileName);
+    showDialog(
+      context: context,
+      builder: (ctx) => AlertDialog(
+        backgroundColor: _isDark ? const Color(0xFF252526) : const Color(0xFFF3F3F3),
+        title: const Text('Guardar como',
+            style: TextStyle(fontSize: 16)),
+        content: TextField(
+          controller: controller,
+          autofocus: true,
+          style: const TextStyle(fontFamily: 'monospace', fontSize: 14),
+          decoration: const InputDecoration(
+            hintText: 'ej: mi_codigo.py',
+            border: OutlineInputBorder(),
+            isDense: true,
+          ),
+        ),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.pop(ctx),
+            child: const Text('Cancelar'),
+          ),
+          TextButton(
+            onPressed: () {
+              final name = controller.text.trim();
+              if (name.isNotEmpty) {
+                Navigator.pop(ctx);
+                _doSave(name);
+              }
+            },
+            child: const Text('Guardar'),
+          ),
+        ],
+      ),
+    );
+  }
+
+  /// Muestra diálogo para abrir archivo.
+  void _showOpenDialog() {
+    final files = _fileManager.listFiles();
+    final recent = _fileManager.recentFiles
+        .where((f) => files.contains(f))
+        .toList();
+
+    showDialog(
+      context: context,
+      builder: (ctx) => AlertDialog(
+        backgroundColor: _isDark ? const Color(0xFF252526) : const Color(0xFFF3F3F3),
+        title: const Text('Abrir archivo',
+            style: TextStyle(fontSize: 16)),
+        content: SizedBox(
+          width: double.maxFinite,
+          height: 300,
+          child: files.isEmpty
+              ? Center(
+                  child: Text(
+                    'No hay archivos en\n~/LeoIDE/',
+                    textAlign: TextAlign.center,
+                    style: TextStyle(
+                      color: _isDark ? const Color(0xFF555555) : const Color(0xFF999999),
+                    ),
+                  ),
+                )
+              : ListView(
+                  children: [
+                    if (recent.isNotEmpty) ...[
+                      Padding(
+                        padding: const EdgeInsets.only(bottom: 4),
+                        child: Text('RECIENTES',
+                            style: TextStyle(
+                              fontSize: 11,
+                              fontWeight: FontWeight.w600,
+                              color: _isDark ? const Color(0xFF858585) : const Color(0xFF666666),
+                            )),
+                      ),
+                      ...recent.map((f) => _FileListItem(
+                            fileName: f,
+                            isDark: _isDark,
+                            onTap: () {
+                              Navigator.pop(ctx);
+                              _doOpen(f);
+                            },
+                          )),
+                      const Divider(height: 16),
+                    ],
+                    Padding(
+                      padding: const EdgeInsets.only(bottom: 4),
+                      child: Text('ARCHIVOS',
+                          style: TextStyle(
+                            fontSize: 11,
+                            fontWeight: FontWeight.w600,
+                            color: _isDark ? const Color(0xFF858585) : const Color(0xFF666666),
+                          )),
+                    ),
+                    ...files.map((f) => _FileListItem(
+                          fileName: f,
+                          isDark: _isDark,
+                          onTap: () {
+                            Navigator.pop(ctx);
+                            _doOpen(f);
+                          },
+                        )),
+                  ],
+                ),
+        ),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.pop(ctx),
+            child: const Text('Cerrar'),
+          ),
+        ],
+      ),
+    );
+  }
+
+  /// Abre un archivo del proyecto.
+  Future<void> _doOpen(String fileName) async {
+    try {
+      final content = await _fileManager.loadFile(fileName);
+      final ext = FileManager.extensionOf(fileName);
+      final lang = _extToLang(ext);
+      final config = _extToConfig(ext);
+
+      setState(() {
+        _engine.loadText(content);
+        _currentFileName = fileName;
+        _currentExtension = ext;
+        _completionEngine.setLanguage(lang);
+        _completionEngine.buildDocument(content);
+        (_textController as HighlightController).setLanguage(config);
+        _textController.text = content;
+        _syncControllerFromEngine();
+      });
+
+      _initLspForExtension(ext);
+      _logToTerminal('📂 Abierto: $fileName');
+    } catch (e) {
+      _logToTerminal('❌ Error al abrir: $e');
+    }
+  }
+
   /// Convierte extensión → nombre de lenguaje (para completion).
   String _extToLang(String ext) {
     switch (ext) {
@@ -805,8 +975,20 @@ void main() {
               icon: const Icon(Icons.stop, size: 22, color: Colors.redAccent),
               tooltip: 'Detener ejecución',
               onPressed: _onStop,
-            ),
+              ),
         // ── Botón Run ──
+        // Botón guardar
+        IconButton(
+          icon: const Icon(Icons.save_outlined, size: 20),
+          tooltip: 'Guardar (Ctrl+S)',
+          onPressed: _onSave,
+        ),
+        // Botón abrir
+        IconButton(
+          icon: const Icon(Icons.folder_open_outlined, size: 20),
+          tooltip: 'Abrir archivo',
+          onPressed: _showOpenDialog,
+        ),
         // Botón terminal
         IconButton(
           icon: Icon(
@@ -1009,6 +1191,61 @@ class _LineNumbers extends StatelessWidget {
         );
       },
     );
+  }
+}
+
+/// Elemento de lista de archivos.
+class _FileListItem extends StatelessWidget {
+  final String fileName;
+  final bool isDark;
+  final VoidCallback onTap;
+
+  const _FileListItem({
+    required this.fileName,
+    required this.isDark,
+    required this.onTap,
+  });
+
+  @override
+  Widget build(BuildContext context) {
+    final ext = FileManager.extensionOf(fileName);
+    final icon = _iconForExt(ext);
+
+    return ListTile(
+      dense: true,
+      leading: Icon(icon, size: 18, color: const Color(0xFF569CD6)),
+      title: Text(
+        fileName,
+        style: const TextStyle(fontFamily: 'monospace', fontSize: 13),
+      ),
+      onTap: onTap,
+    );
+  }
+
+  IconData _iconForExt(String ext) {
+    switch (ext) {
+      case '.dart':
+        return Icons.code;
+      case '.py':
+        return Icons.code;
+      case '.c':
+      case '.cpp':
+      case '.cc':
+      case '.cxx':
+        return Icons.memory;
+      case '.js':
+      case '.mjs':
+        return Icons.javascript;
+      case '.php':
+        return Icons.code;
+      case '.html':
+      case '.htm':
+        return Icons.web;
+      case '.css':
+        return Icons.palette;
+      default:
+        return Icons.insert_drive_file;
+    }
   }
 }
 
