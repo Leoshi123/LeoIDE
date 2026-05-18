@@ -94,10 +94,18 @@ void main() {
     _viewport.maxLineWidth = maxWidth;
   }
 
+  void _onTextChanged() {
+    _updateMaxLineWidth();
+    _viewport.ensureCursorVisible(
+      _engine.cursor.line,
+      _engine.cursor.column,
+    );
+    setState(() {});
+  }
+
   void _onSymbolTap(String symbol) {
     _engine.insertAtCursor(symbol);
-    _updateMaxLineWidth();
-    setState(() {});
+    _onTextChanged();
   }
 
   void _onNewFile() {
@@ -173,6 +181,7 @@ void main() {
                   textColor: editorColors.text,
                   lineNumberColor: editorColors.lineNumber,
                   lineNumberBgColor: editorColors.lineNumberBg,
+                  onTextChanged: _onTextChanged,
                 );
               },
             ),

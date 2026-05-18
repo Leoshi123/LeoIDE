@@ -1,12 +1,14 @@
 import 'package:flutter/material.dart';
+import 'package:flutter/services.dart';
 import '../engine/text_engine.dart';
 import '../engine/virtual_viewport.dart';
+import '../engine/input_handler.dart';
 import 'cursor_painter.dart';
 
 /// Canvas personalizado que renderiza el editor de código.
 ///
 /// Usa CustomPainter de Flutter para dibujar solo las líneas visibles
-/// (virtual scrolling), más el cursor y los números de línea.
+/// (virtual scrolling), más el cursor, números de línea y manejo de input.
 class EditorCanvas extends StatefulWidget {
   final TextEngine engine;
   final VirtualViewport viewport;
@@ -14,6 +16,9 @@ class EditorCanvas extends StatefulWidget {
   final Color textColor;
   final Color lineNumberColor;
   final Color lineNumberBgColor;
+
+  /// Callback cuando el texto cambia (para que el padre actualice estado).
+  final VoidCallback? onTextChanged;
 
   const EditorCanvas({
     super.key,
@@ -23,6 +28,7 @@ class EditorCanvas extends StatefulWidget {
     this.textColor = const Color(0xFFD4D4D4),
     this.lineNumberColor = const Color(0xFF858585),
     this.lineNumberBgColor = const Color(0xFF252526),
+    this.onTextChanged,
   });
 
   @override
@@ -33,6 +39,8 @@ class _EditorCanvasState extends State<EditorCanvas>
     with SingleTickerProviderStateMixin {
   late CursorPainter _cursorPainter;
   late AnimationController _blinkController;
+  late FocusNode _focusNode;
+  EditorInputHandler? _inputHandler;
 
   @override
   void initState() {
@@ -45,47 +53,94 @@ class _EditorCanvasState extends State<EditorCanvas>
       vsync: this,
       duration: const Duration(seconds: 1),
     )..repeat();
+    _focusNode = FocusNode();
+    _setupInputHandler();
+  }
+
+  void _setupInputHandler() {
+    _inputHandler = EditorInputHandler(
+      engine: widget.engine,
+      focusNode: _focusNode,
+      onTextChanged: () {
+        _cursorPainter.resetBlink();
+        _updateViewport();
+        widget.onTextChanged?.call();
+        if (mounted) setState(() {});
+      },
+      onCursorMoved: () {
+        _cursorPainter.resetBlink();
+        widget.viewport.ensureCursorVisible(
+          widget.engine.cursor.line,
+          widget.engine.cursor.column,
+        );
+        if (mounted) setState(() {});
+      },
+    );
+  }
+
+  void _updateViewport() {
+    widget.viewport.totalLines = widget.engine.lineCount;
+    // Actualizar maxLineWidth
+    double maxWidth = 0;
+    for (int i = 0; i < widget.engine.lineCount; i++) {
+      final lineLen = widget.engine.lineAt(i).length.toDouble();
+      maxWidth = maxWidth > lineLen ? maxWidth : lineLen;
+    }
+    widget.viewport.maxLineWidth = maxWidth * widget.viewport.charWidth;
   }
 
   @override
   void dispose() {
+    _inputHandler?.dispose();
+    _focusNode.dispose();
     _blinkController.dispose();
     super.dispose();
   }
 
   @override
   Widget build(BuildContext context) {
-    return AnimatedBuilder(
-      animation: _blinkController,
-      builder: (context, child) {
-        return GestureDetector(
-          onTapDown: (details) => _handleTap(details.localPosition),
-          onPanStart: (details) => _handlePanStart(details.localPosition),
-          onPanUpdate: (details) => _handlePanUpdate(details.delta),
-          onPanEnd: (_) => _handlePanEnd(),
-          child: ClipRect(
-            child: CustomPaint(
-              painter: _EditorPainter(
-                engine: widget.engine,
-                viewport: widget.viewport,
-                cursorPainter: _cursorPainter,
-                backgroundColor: widget.backgroundColor,
-                textColor: widget.textColor,
-                lineNumberColor: widget.lineNumberColor,
-                lineNumberBgColor: widget.lineNumberBgColor,
-                elapsedSeconds: (_blinkController.lastElapsedDuration?.inMilliseconds ?? 0)
-                        .toDouble() /
-                    1000.0,
-              ),
-              size: Size.infinite,
-            ),
+    return GestureDetector(
+      onTapDown: (details) => _handleTap(details.localPosition),
+      onPanStart: (details) => _handlePanStart(details.localPosition),
+      onPanUpdate: (details) => _handlePanUpdate(details.delta),
+      onPanEnd: (_) => _handlePanEnd(),
+      child: KeyboardListener(
+        focusNode: _focusNode,
+        autofocus: true,
+        includeSemantics: false,
+        onKeyEvent: (event) {
+          _inputHandler?.handleKeyEvent(event);
+          return KeyEventResult.handled;
+        },
+        child: ClipRect(
+          child: AnimatedBuilder(
+            animation: _blinkController,
+            builder: (context, child) {
+              return CustomPaint(
+                painter: _EditorPainter(
+                  engine: widget.engine,
+                  viewport: widget.viewport,
+                  cursorPainter: _cursorPainter,
+                  backgroundColor: widget.backgroundColor,
+                  textColor: widget.textColor,
+                  lineNumberColor: widget.lineNumberColor,
+                  lineNumberBgColor: widget.lineNumberBgColor,
+                  elapsedSeconds:
+                      (_blinkController.lastElapsedDuration?.inMilliseconds ?? 0)
+                              .toDouble() /
+                          1000.0,
+                ),
+                size: Size.infinite,
+              );
+            },
           ),
-        );
-      },
+        ),
+      ),
     );
   }
 
   void _handleTap(Offset position) {
+    _focusNode.requestFocus();
     widget.engine.moveCursorToTouch(
       touchX: position.dx,
       touchY: position.dy,
@@ -96,20 +151,19 @@ class _EditorCanvasState extends State<EditorCanvas>
     );
     _cursorPainter.resetBlink();
     setState(() {});
+
+    // En móvil, esto activa el teclado virtual
+    _inputHandler?.connect();
   }
 
-  void _handlePanStart(Offset position) {
-    // Iniciar scroll táctil
-  }
+  void _handlePanStart(Offset position) {}
 
   void _handlePanUpdate(Offset delta) {
     widget.viewport.scrollBy(-delta.dx, -delta.dy);
     setState(() {});
   }
 
-  void _handlePanEnd() {
-    // Inercia del scroll (placeholder para Fase 2)
-  }
+  void _handlePanEnd() {}
 }
 
 /// Painter que renderiza líneas de texto, cursor y números de línea.
@@ -123,7 +177,6 @@ class _EditorPainter extends CustomPainter {
   final Color lineNumberBgColor;
   final double elapsedSeconds;
 
-  // Ancho del gutter para números de línea
   static const double gutterWidth = 50.0;
 
   _EditorPainter({
@@ -146,19 +199,14 @@ class _EditorPainter extends CustomPainter {
   }
 
   void _drawBackground(Canvas canvas, Size size) {
-    // Fondo del editor
     canvas.drawRect(
       Rect.fromLTWH(0, 0, size.width, size.height),
       Paint()..color = backgroundColor,
     );
-
-    // Fondo del gutter
     canvas.drawRect(
       Rect.fromLTWH(0, 0, gutterWidth, size.height),
       Paint()..color = lineNumberBgColor,
     );
-
-    // Línea separadora del gutter
     canvas.drawLine(
       Offset(gutterWidth, 0),
       Offset(gutterWidth, size.height),
@@ -187,7 +235,6 @@ class _EditorPainter extends CustomPainter {
         ),
       );
       textPainter.layout(maxWidth: gutterWidth - 10);
-
       textPainter.paint(
         canvas,
         Offset(gutterWidth - textPainter.width - 8, y + 3),
@@ -213,12 +260,10 @@ class _EditorPainter extends CustomPainter {
 
       final lineText = engine.lineAt(i);
       final displayText = lineText.replaceAll('\t', '  ');
-
       final x = gutterWidth + 8 - viewport.scrollX;
 
       textPainter.text = TextSpan(text: displayText, style: textStyle);
       textPainter.layout(maxWidth: size.width - gutterWidth - 16);
-
       textPainter.paint(canvas, Offset(x, y + 2));
     }
   }
@@ -231,48 +276,20 @@ class _EditorPainter extends CustomPainter {
       charWidth: viewport.charWidth,
       lineHeight: viewport.lineHeight,
     );
-
     final cursorScreenX = x + gutterWidth + 8;
-    final cursorScreenY = y;
-
-    cursorPainter.paint(canvas, cursorScreenX, cursorScreenY, elapsedSeconds);
+    cursorPainter.paint(canvas, cursorScreenX, y, elapsedSeconds);
   }
 
   @override
-  bool shouldRepaint(covariant _EditorPainter oldDelegate) {
-    return true; // Siempre repintar por el parpadeo del cursor
-  }
+  bool shouldRepaint(covariant _EditorPainter oldDelegate) => true;
 }
 
-/// Wrapper para AnimatedBuilder (similar a AnimatedBuilder de Flutter).
-class AnimatedBuilder extends StatelessWidget {
-  final Animation<double> animation;
+/// Wrapper para animación del parpadeo del cursor.
+class AnimatedBuilder extends AnimatedWidget {
   final Widget Function(BuildContext context, Widget? child) builder;
   final Widget? child;
 
   const AnimatedBuilder({
-    super.key,
-    required this.animation,
-    required this.builder,
-    this.child,
-  });
-
-  @override
-  Widget build(BuildContext context) {
-    return AnimatedBuilder2(
-      animation: animation,
-      builder: builder,
-      child: child,
-    );
-  }
-}
-
-/// Versión correcta usando AnimatedWidget.
-class AnimatedBuilder2 extends AnimatedWidget {
-  final Widget Function(BuildContext context, Widget? child) builder;
-  final Widget? child;
-
-  const AnimatedBuilder2({
     super.key,
     required Animation<double> animation,
     required this.builder,
@@ -280,7 +297,5 @@ class AnimatedBuilder2 extends AnimatedWidget {
   }) : super(listenable: animation);
 
   @override
-  Widget build(BuildContext context) {
-    return builder(context, child);
-  }
+  Widget build(BuildContext context) => builder(context, child);
 }
