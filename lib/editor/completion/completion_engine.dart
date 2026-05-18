@@ -13,15 +13,24 @@ import 'providers/document_provider.dart';
 /// 2. ContextParser analiza qué se está escribiendo
 /// 3. Providers recolectan candidatos según el contexto
 /// 4. FuzzyScorer ordena por relevancia
-/// 5. Retorna top-N resultados
+/// 5. Usage bonus: items usados frecuentemente suben en ranking
+/// 6. Retorna top-N resultados
 class CompletionEngine {
   final FuzzyScorer _scorer;
-  late final KeywordProvider _keywordProvider;
-  late final SnippetProvider _snippetProvider;
-  late final SymbolProvider _symbolProvider;
-  late final DocumentProvider _documentProvider;
+  late KeywordProvider _keywordProvider;
+  late SnippetProvider _snippetProvider;
+  late SymbolProvider _symbolProvider;
+  late DocumentProvider _documentProvider;
 
   String _language = 'dart';
+
+  // ── Uso reciente ──
+
+  /// Frecuencia de uso por label.
+  final Map<String, int> _usageCount = {};
+
+  /// Orden de recencia (más reciente primero, max 10).
+  final List<String> _recencyOrder = [];
 
   CompletionEngine() : _scorer = FuzzyScorer.instance {
     _keywordProvider = KeywordProvider(_language);
@@ -29,6 +38,39 @@ class CompletionEngine {
     _symbolProvider = SymbolProvider(_language);
     _documentProvider = DocumentProvider();
   }
+
+  /// Registra que un item fue usado/aceptado.
+  void recordUsage(String label) {
+    _usageCount[label] = (_usageCount[label] ?? 0) + 1;
+
+    // Actualizar recencia
+    _recencyOrder.remove(label);
+    _recencyOrder.insert(0, label);
+    if (_recencyOrder.length > 10) {
+      _recencyOrder.removeLast();
+    }
+  }
+
+  /// Bonus por uso reciente/frecuente (0.0 – 0.15).
+  double _usageBonus(String label) {
+    double bonus = 0.0;
+
+    // Bonus por frecuencia: +0.02 por uso, max +0.10 (5 usos)
+    final count = _usageCount[label] ?? 0;
+    bonus += (count.clamp(0, 5)) * 0.02;
+
+    // Bonus por recencia: top 3 → +0.05, top 10 → +0.02
+    final index = _recencyOrder.indexOf(label);
+    if (index >= 0 && index < 3) {
+      bonus += 0.05;
+    } else if (index >= 0 && index < 10) {
+      bonus += 0.02;
+    }
+
+    return bonus.clamp(0.0, 0.15);
+  }
+
+  // ── Fin UsageTracker ──
 
   /// Cambia el lenguaje activo.
   void setLanguage(String language) {
@@ -94,8 +136,14 @@ class CompletionEngine {
     final prefix = context.prefix;
 
     if (prefix.isEmpty) {
-      // Sin prefijo → ordenar por prioridad de tipo
-      candidates.sort((a, b) => a.priority.compareTo(b.priority));
+      // Sin prefijo → ordenar por prioridad de tipo + uso reciente
+      candidates.sort((a, b) {
+        final aUsage = _usageBonus(a.label);
+        final bUsage = _usageBonus(b.label);
+        final aScore = a.priority + aUsage;
+        final bScore = b.priority + bUsage;
+        return bScore.compareTo(aScore);
+      });
       return CompletionResult(
         context: context,
         items: candidates.take(15).toList(),
@@ -108,17 +156,20 @@ class CompletionEngine {
     for (final item in candidates) {
       final score = _scorer.score(prefix, item.label);
       if (score > 0.0) {
+        // Boost por uso reciente
+        final usageBoost = _usageBonus(item.label);
         // Boost extra para snippets (siempre útiles)
-        final adjusted = item.kind == CompletionItemKind.snippet
-            ? score + 0.1
-            : score;
+        final snippetBoost = item.kind == CompletionItemKind.snippet
+            ? 0.1
+            : 0.0;
+        final adjusted = (score + usageBoost + snippetBoost).clamp(0.0, 1.0);
         final ranked = CompletionItem(
           label: item.label,
           insertText: item.insertText,
           kind: item.kind,
           detail: item.detail,
           documentation: item.documentation,
-          score: adjusted.clamp(0.0, 1.0),
+          score: adjusted,
         );
         scored.putIfAbsent(adjusted, () => []).add(ranked);
       }

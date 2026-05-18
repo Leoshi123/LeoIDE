@@ -417,6 +417,11 @@ void main() {
       wordStart--;
     }
 
+    // Registrar el uso para ranking
+    if (_completionItems.isNotEmpty && _completionSelectedIndex < _completionItems.length) {
+      _completionEngine.recordUsage(_completionItems[_completionSelectedIndex].label);
+    }
+
     // Reemplazar la palabra actual con insertText
     final newText = text.substring(0, wordStart) +
         insertText +
