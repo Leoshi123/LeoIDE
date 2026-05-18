@@ -1,7 +1,10 @@
+import 'dart:async';
+import 'dart:io';
 import 'package:flutter/material.dart';
 import 'editor/engine/text_engine.dart';
 import 'editor/engine/virtual_viewport.dart';
 import 'editor/engine/symtable.dart';
+import 'editor/engine/runner.dart';
 import 'editor/widgets/editor_canvas.dart';
 import 'editor/widgets/completion_popup.dart';
 import 'editor/models/code_template.dart';
@@ -341,33 +344,81 @@ void main() {
 
   // ── Run / Stop ──
 
-  void _onRun() {
+  CodeRunner? _currentRunner;
+
+  void _onRun() async {
+    final code = _textController.text.trim();
+    if (code.isEmpty) {
+      _logToTerminal('⚠️ No hay código para ejecutar.');
+      return;
+    }
+
+    final runner = runnerForExtension(_currentExtension);
+    if (runner == null) {
+      _logToTerminal('❌ No hay runner disponible para $_currentExtension');
+      _logToTerminal('   Lenguajes soportados: .py, .c, .cpp, .js, .php, .dart, .html, .css');
+      return;
+    }
+
     setState(() {
       _isRunning = true;
       _showTerminal = true;
+      _terminalLog.clear();
+      _currentRunner = runner;
     });
-    _terminalLog.clear();
-    _logToTerminal('⚡ Ejecutando $_currentFileName...');
-    _logToTerminal('   Lenguaje: ${_currentExtension.substring(1)}');
-    _logToTerminal('   Engine: Piece Table + SymTable activo');
+
+    _logToTerminal('╔══════════════════════════════════════════');
+    _logToTerminal('║ ▶  Ejecutando: $_currentFileName');
+    _logToTerminal('║    Lenguaje: ${runner.language}');
+    _logToTerminal('║    ${_engine.lineCount} líneas · ${_engine.length} caracteres');
+    _logToTerminal('╚══════════════════════════════════════════');
     _logToTerminal('');
 
-    // Simular ejecución (Fase 3: aquí irán los runners reales)
-    Future.delayed(const Duration(milliseconds: 500), () {
-      _logToTerminal('📝 Código cargado (${_engine.length} caracteres)');
-      _logToTerminal('📊 ${_engine.lineCount} líneas, ${_engine.pieceTable.pieceCount} piezas en memoria');
+    final stopwatch = Stopwatch()..start();
+
+    if (runner is CRunner || runner is CppRunner) {
+      _logToTerminal('🔨 Compilando...');
+    } else {
+      _logToTerminal('🚀 Ejecutando...');
+    }
+    _logToTerminal('');
+
+    try {
+      final result = await runner.run(
+        code,
+        onOutput: (line, isError) {
+          if (!_isRunning && mounted) return; // cancelado
+          _logToTerminal(isError ? '⚠️  $line' : '   $line');
+        },
+      );
+
+      stopwatch.stop();
+
+      if (!mounted) return;
+
       _logToTerminal('');
-      _logToTerminal('🔧 Compilación no disponible aún — Fase 3 próximamente');
-      _logToTerminal('   Pendiente: NDK, Chaquopy, PHP-CGI runners');
+      if (result.success) {
+        _logToTerminal('✅ Proceso completado (${result.duration.inMilliseconds}ms)');
+      } else if (_isRunning) {
+        _logToTerminal('❌ Proceso terminado con código ${result.exitCode}');
+      }
+    } catch (e) {
+      if (!mounted) return;
+      stopwatch.stop();
       _logToTerminal('');
-      _logToTerminal('✅ Ejecución simulada completada.');
-      setState(() => _isRunning = false);
-    });
+      _logToTerminal('❌ Error del sistema: $e');
+    }
+
+    if (mounted) setState(() => _isRunning = false);
   }
 
   void _onStop() {
+    _logToTerminal('');
+    _logToTerminal('⛔ Deteniendo proceso...');
+    _currentRunner?.cancel();
+    _currentRunner = null;
     setState(() => _isRunning = false);
-    _logToTerminal('⛔ Ejecución detenida por el usuario.');
+    _logToTerminal('⛔ Proceso detenido por el usuario.');
   }
 
   void _logToTerminal(String line) {
