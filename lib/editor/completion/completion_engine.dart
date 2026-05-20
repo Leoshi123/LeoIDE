@@ -70,6 +70,36 @@ class CompletionEngine {
     return bonus.clamp(0.0, 0.15);
   }
 
+  /// Bonus por tipo de elemento (0.0 – 0.08).
+  ///
+  /// En VS Code, el tipo del item influye en su posición:
+  /// snippets > clases > métodos > propiedades > variables > keywords.
+  /// Esto replica ese comportamiento como un boost numérico.
+  static double _typeBonus(CompletionItemKind kind) {
+    switch (kind) {
+      case CompletionItemKind.snippet:
+        return 0.08;
+      case CompletionItemKind.classs:
+      case CompletionItemKind.interface:
+        return 0.06;
+      case CompletionItemKind.method:
+      case CompletionItemKind.function:
+        return 0.05;
+      case CompletionItemKind.constructor:
+        return 0.04;
+      case CompletionItemKind.property:
+        return 0.03;
+      case CompletionItemKind.variable:
+        return 0.02;
+      case CompletionItemKind.keyword:
+        return 0.01;
+      case CompletionItemKind.module:
+      case CompletionItemKind.value:
+      case CompletionItemKind.reference:
+        return 0.0;
+    }
+  }
+
   // ── Fin UsageTracker ──
 
   /// Cambia el lenguaje activo.
@@ -136,12 +166,10 @@ class CompletionEngine {
     final prefix = context.prefix;
 
     if (prefix.isEmpty) {
-      // Sin prefijo → ordenar por prioridad de tipo + uso reciente
+      // Sin prefijo → ordenar por tipo + uso reciente
       candidates.sort((a, b) {
-        final aUsage = _usageBonus(a.label);
-        final bUsage = _usageBonus(b.label);
-        final aScore = a.priority + aUsage;
-        final bScore = b.priority + bUsage;
+        final aScore = _typeBonus(a.kind) + _usageBonus(a.label);
+        final bScore = _typeBonus(b.kind) + _usageBonus(b.label);
         return bScore.compareTo(aScore);
       });
       return CompletionResult(
@@ -156,13 +184,10 @@ class CompletionEngine {
     for (final item in candidates) {
       final score = _scorer.score(prefix, item.label);
       if (score > 0.0) {
-        // Boost por uso reciente
+        // Boost por uso reciente + tipo de elemento
         final usageBoost = _usageBonus(item.label);
-        // Boost extra para snippets (siempre útiles)
-        final snippetBoost = item.kind == CompletionItemKind.snippet
-            ? 0.1
-            : 0.0;
-        final adjusted = (score + usageBoost + snippetBoost).clamp(0.0, 1.0);
+        final typeBoost = _typeBonus(item.kind);
+        final adjusted = (score + usageBoost + typeBoost).clamp(0.0, 1.0);
         final ranked = CompletionItem(
           label: item.label,
           insertText: item.insertText,
