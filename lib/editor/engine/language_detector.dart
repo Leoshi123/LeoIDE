@@ -55,6 +55,7 @@ class LanguageDetector {
 
   static final List<_Pattern> _pyPatterns = [
     _Pattern(RegExp(r'^#!\s*/.*python'), 10, 'shebang python'),
+    _Pattern(RegExp(r'^#!\s*/.*python3'), 10, 'shebang python3'),
     _Pattern(RegExp(r'^\s*def\s+\w+\s*\('), 4, 'def function'),
     _Pattern(RegExp(r'^\s*class\s+\w+\s*:'), 4, 'class: (no braces)'),
     _Pattern(RegExp(r"""^\s*if\s+__name__\s*==\s*["']__main__["']\s*:"""), 8,
@@ -130,6 +131,7 @@ class LanguageDetector {
   ];
 
   static final List<_Pattern> _jsPatterns = [
+    _Pattern(RegExp(r'^#!\s*/.*node'), 10, 'shebang node'),
     _Pattern(RegExp(r'^\s*(const|let|var)\s+\w+\s*='), 2, 'const/let/var ='),
     _Pattern(RegExp(r'^\s*function\s+\w+\s*\('), 3, 'function name('),
     _Pattern(RegExp(r'\bconsole\.(log|error|warn|debug)\b'), 3, 'console.*'),
@@ -152,6 +154,7 @@ class LanguageDetector {
   static final List<_Pattern> _phpPatterns = [
     _Pattern(RegExp(r'^<\?php'), 10, '<?php'),
     _Pattern(RegExp(r'^<\?='), 8, '<?='),
+    _Pattern(RegExp(r'^#!\s*/.*php'), 10, 'shebang php'),
     _Pattern(RegExp(r'^\s*\$[a-zA-Z_]'), 4, '\$variable'),
     _Pattern(RegExp(r'^\s*echo\s'), 3, 'echo'),
     _Pattern(RegExp(r'^\s*function\s+\w+\s*\('), 2, 'function'),
