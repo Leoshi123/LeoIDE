@@ -10,6 +10,8 @@ import 'editor/completion/models/completion_item.dart';
 import 'editor/completion/models/completion_context.dart';
 import 'editor/highlight/highlight_controller.dart';
 import 'editor/highlight/syntax_lexer.dart';
+import 'editor/models/tab_manager.dart';
+import 'editor/widgets/tab_bar.dart';
 import 'editor/lsp/lsp_manager.dart';
 import 'editor/lsp/models/lsp_types.dart';
 import 'editor/widgets/completion_popup.dart';
@@ -67,6 +69,7 @@ class _EditorScreenState extends State<EditorScreen> {
   late final CompletionEngine _completionEngine;
   late final LspManager _lspManager;
   late final FileManager _fileManager;
+  late final TabManager _tabManager;
   Timer? _lspDebounce;
   bool _syncing = false;
 
@@ -75,6 +78,8 @@ class _EditorScreenState extends State<EditorScreen> {
   String _currentFileName = 'sin_titulo.dart';
   bool _isDark = true;
   bool _showTerminal = false;
+  int _cursorLine = 1;
+  int _cursorColumn = 1;
   final List<String> _terminalLog = [];
   bool _isRunning = false;
   bool _diagnosticsExpanded = false;
@@ -108,6 +113,8 @@ void main() {
     _fileManager = FileManager(
       projectRoot: '${Platform.environment['HOME'] ?? '/tmp'}/LeoIDE',
     );
+    _tabManager = TabManager();
+    _loadTabsState();
     _textController = HighlightController(text: _engine.text);
     _textController.addListener(_onTextChanged);
     _editorFocus.addListener(_onFocusChanged);
@@ -212,20 +219,31 @@ void main() {
     });
 
     final sel = _textController.selection;
+    int line = 1, col = 1;
     if (sel.isValid && sel.isCollapsed) {
       final pos = sel.baseOffset.clamp(0, _engine.length);
-      final (line, col) = _engine.pieceTable.positionToLineCol(pos);
+      final (l, c) = _engine.pieceTable.positionToLineCol(pos);
+      line = l + 1; // 1-indexed
+      col = c + 1;
       // Mover cursor del engine a la posición correcta
       final currentLine = _engine.cursor.line;
       final currentCol = _engine.cursor.column;
-      if (line != currentLine || col != currentCol) {
+      if (line - 1 != currentLine || col - 1 != currentCol) {
         // Reset a (0,0)
         for (int i = 0; i < currentLine; i++) _engine.moveCursorUp();
         for (int i = 0; i < currentCol; i++) _engine.moveCursorLeft();
         // Ir a (line, col)
-        for (int i = 0; i < line; i++) _engine.moveCursorDown();
-        for (int i = 0; i < col; i++) _engine.moveCursorRight();
+        for (int i = 0; i < line - 1; i++) _engine.moveCursorDown();
+        for (int i = 0; i < col - 1; i++) _engine.moveCursorRight();
       }
+    }
+
+    // Actualizar UI con posición del cursor
+    if (_cursorLine != line || _cursorColumn != col) {
+      setState(() {
+        _cursorLine = line;
+        _cursorColumn = col;
+      });
     }
 
     _updateCompletion();
@@ -624,6 +642,38 @@ void main() {
     }
   }
 
+  /// Archivo de estado de tabs.
+  String get _tabsStatePath =>
+      '${_fileManager.projectRoot}/.tabs_state.json';
+
+  /// Carga el estado de tabs desde archivo.
+  Future<void> _loadTabsState() async {
+    try {
+      await _tabManager.loadFromFile(_tabsStatePath);
+      if (_tabManager.hasTabs) {
+        final tab = _tabManager.activeTab;
+        if (tab != null) {
+          // Cargar contenido desde archivo
+          final content = await _fileManager.loadFile(tab.id);
+          _tabManager.tabs[_tabManager.activeIndex] = 
+              tab.copyWith(content: content.isEmpty ? '' : content);
+          _loadTab(_tabManager.activeTab!);
+        }
+      }
+    } catch (e) {
+      // Silencioso si no existe o hay error
+    }
+  }
+
+  /// Guarda el estado de tabs a archivo.
+  Future<void> _saveTabsState() async {
+    try {
+      await _tabManager.saveToFile(_tabsStatePath);
+    } catch (e) {
+      // Silencioso
+    }
+  }
+
   /// Muestra diálogo para guardar con nombre.
   void _showSaveAsDialog() {
     final controller = TextEditingController(text: _currentFileName);
@@ -745,25 +795,78 @@ void main() {
   Future<void> _doOpen(String fileName) async {
     try {
       final content = await _fileManager.loadFile(fileName);
-      final ext = FileManager.extensionOf(fileName);
-      final lang = _extToLang(ext);
-      final config = _extToConfig(ext);
 
-      setState(() {
-        _engine.loadText(content);
-        _currentFileName = fileName;
-        _currentExtension = ext;
-        _completionEngine.setLanguage(lang);
-        _completionEngine.buildDocument(content);
-        (_textController as HighlightController).setLanguage(config);
-        _textController.text = content;
-        _syncControllerFromEngine();
-      });
+      // Abrir en pestaña o enfocar si ya existe
+      _tabManager.openFile(fileName, content);
+      _loadTab(_tabManager.activeTab!);
+      _saveTabsState();
 
-      _initLspForExtension(ext);
       _logToTerminal('📂 Abierto: $fileName');
     } catch (e) {
       _logToTerminal('❌ Error al abrir: $e');
+    }
+  }
+
+  // ── Tabs ──
+
+  void _onTabSelected(int index) {
+    if (index < 0 || index >= _tabManager.tabs.length) return;
+
+    final tab = _tabManager.tabs[index];
+    _loadTab(tab);
+  }
+
+  void _loadTab(EditorTab tab) {
+    final lang = _extToLang(tab.extension);
+    final config = _extToConfig(tab.extension);
+
+    setState(() {
+      _currentFileName = tab.name;
+      _currentExtension = tab.extension;
+      _completionEngine.setLanguage(lang);
+      _completionEngine.buildDocument(tab.content);
+      (_textController as HighlightController).setLanguage(config);
+      _textController.text = tab.content;
+      _syncControllerFromEngine();
+    });
+
+    _tabManager.setActive(_tabManager.tabs.indexOf(tab));
+    _saveTabsState();
+    _initLspForExtension(tab.extension);
+  }
+
+  void _onTabClosed(int index) {
+    // Si es la pestaña activa, guardar estado antes de cerrar
+    if (index == _tabManager.activeIndex) {
+      _saveCurrentToTab();
+    }
+
+    _tabManager.closeTab(index);
+    _saveTabsState();
+
+    // Si quedan tabs, cargar la nueva activa
+    if (_tabManager.hasTabs) {
+      _loadTab(_tabManager.activeTab!);
+    } else {
+      // No hay más tabs → crear uno nuevo
+      _onNewFile();
+    }
+  }
+
+  void _onTabPinToggle(int index) {
+    _tabManager.togglePin(index);
+    _saveTabsState();
+    setState(() {}); // Actualizar UI
+  }
+
+  void _saveCurrentToTab() {
+    if (_tabManager.activeTab != null) {
+      final idx = _tabManager.activeIndex;
+      _tabManager.tabs[idx] = _tabManager.tabs[idx].copyWith(
+        content: _textController.text,
+        isDirty: _tabManager.tabs[idx].isDirty || 
+            (_textController.text != _tabManager.tabs[idx].content),
+      );
     }
   }
 
@@ -970,9 +1073,34 @@ void main() {
         ),
       ),
       appBar: AppBar(
-        title: Text(
-          _currentFileName,
-          style: const TextStyle(fontFamily: 'monospace', fontSize: 14),
+        title: Row(
+          children: [
+            // Icono de lenguaje
+            Container(
+              padding: const EdgeInsets.symmetric(horizontal: 6, vertical: 2),
+              decoration: BoxDecoration(
+                color: _isDark ? const Color(0xFF3C3C3C) : const Color(0xFFE8E8E8),
+                borderRadius: BorderRadius.circular(4),
+              ),
+              child: Text(
+                _currentExtension.replaceAll('.', '').toUpperCase(),
+                style: TextStyle(
+                  fontFamily: 'monospace',
+                  fontSize: 11,
+                  fontWeight: FontWeight.bold,
+                  color: _isDark ? const Color(0xFF4FC1FF) : const Color(0xFF0066B8),
+                ),
+              ),
+            ),
+            const SizedBox(width: 8),
+            Expanded(
+              child: Text(
+                _currentFileName,
+                style: const TextStyle(fontFamily: 'monospace', fontSize: 13),
+                overflow: TextOverflow.ellipsis,
+              ),
+            ),
+          ],
         ),
         actions: [
           // Menú explorador
@@ -1052,6 +1180,15 @@ void main() {
       ),
       body: Column(
         children: [
+          // Barra de tabs
+          EditorTabBar(
+            tabManager: _tabManager,
+            isDark: _isDark,
+            onTabSelected: _onTabSelected,
+            onTabClosed: _onTabClosed,
+            onTabPinToggle: _onTabPinToggle,
+          ),
+
           // Editor
           Expanded(
             child: Container(
@@ -1137,6 +1274,56 @@ void main() {
               isDark: _isDark,
               onClear: _clearTerminal,
             ),
+
+          // Status Bar (estilo VS Code)
+          Container(
+            height: 24,
+            color: _isDark ? const Color(0xFF007ACC) : const Color(0xFF0078D4),
+            padding: const EdgeInsets.symmetric(horizontal: 12),
+            child: Row(
+              children: [
+                // Errores y warnings
+                if ((_textController as HighlightController).diagnostics.isNotEmpty) ...[
+                  _StatusItem(
+                    icon: Icons.error_outline,
+                    count: (_textController as HighlightController).diagnostics
+                        .where((d) => d.severity == 1).length,
+                    label: 'errores',
+                  ),
+                  const SizedBox(width: 12),
+                  _StatusItem(
+                    icon: Icons.warning_amber,
+                    count: (_textController as HighlightController).diagnostics
+                        .where((d) => d.severity == 2).length,
+                    label: 'warnings',
+                  ),
+                ] else ...[
+                  const Text(
+                    'Listo',
+                    style: TextStyle(color: Colors.white, fontSize: 12),
+                  ),
+                ],
+                const Spacer(),
+                // Posición del cursor
+                Text(
+                  'Ln $_cursorLine, Col $_cursorColumn',
+                  style: const TextStyle(color: Colors.white, fontSize: 12),
+                ),
+                const SizedBox(width: 16),
+                // Encoding
+                Text(
+                  'UTF-8',
+                  style: TextStyle(color: Colors.white.withOpacity(0.8), fontSize: 12),
+                ),
+                const SizedBox(width: 16),
+                // Lenguaje
+                Text(
+                  _currentExtension.replaceAll('.', '').toUpperCase(),
+                  style: const TextStyle(color: Colors.white, fontSize: 12),
+                ),
+              ],
+            ),
+          ),
 
           // Barra de símbolos
           SymbolBar(
@@ -1285,6 +1472,34 @@ class _FileListItem extends StatelessWidget {
       default:
         return Icons.insert_drive_file;
     }
+  }
+}
+
+/// Item de la status bar.
+class _StatusItem extends StatelessWidget {
+  final IconData icon;
+  final int count;
+  final String label;
+
+  const _StatusItem({
+    required this.icon,
+    required this.count,
+    required this.label,
+  });
+
+  @override
+  Widget build(BuildContext context) {
+    return Row(
+      mainAxisSize: MainAxisSize.min,
+      children: [
+        Icon(icon, size: 14, color: Colors.white),
+        const SizedBox(width: 4),
+        Text(
+          '$count $label',
+          style: const TextStyle(color: Colors.white, fontSize: 12),
+        ),
+      ],
+    );
   }
 }
 
