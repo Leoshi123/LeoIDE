@@ -73,6 +73,15 @@ class LspClient {
       // Servidores LSP a veces mandan logs por stderr
     });
 
+    // Detectar si el proceso muere inesperadamente (Heartbeat pasivo)
+    _process!.exitCode.then((code) {
+      if (!_shutdown) {
+        _initialized = false;
+        _process = null;
+        // In a real IDE, we could trigger an auto-restart here.
+      }
+    });
+
     // Enviar initialize
     await _initialize();
   }
@@ -238,6 +247,12 @@ class LspClient {
   /// Procesa datos entrantes del servidor.
   void _onData(String data) {
     _incomingBuffer += data;
+
+    // Buffer limit of 1MB to prevent memory leaks from rogue LSPs
+    const maxBuffer = 1 * 1024 * 1024;
+    if (_incomingBuffer.length > maxBuffer) {
+      _incomingBuffer = _incomingBuffer.substring(_incomingBuffer.length - maxBuffer);
+    }
 
     while (true) {
       // Buscar Content-Length header

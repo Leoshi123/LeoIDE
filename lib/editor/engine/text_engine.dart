@@ -1,6 +1,15 @@
 import '../models/piece_table.dart';
 import '../models/cursor.dart';
 
+/// Representa un cambio en el documento para que la UI pueda reaccionar eficientemente.
+class TextDelta {
+  final int offset;
+  final String text;
+  final bool isInsert;
+
+  TextDelta({required this.offset, required this.text, required this.isInsert});
+}
+
 /// Orquestador del editor. Coordina PieceTable + Cursor + operaciones.
 ///
 /// Es la capa que la UI consume directamente. Toda modificación del texto
@@ -8,6 +17,9 @@ import '../models/cursor.dart';
 class TextEngine {
   PieceTable _pieceTable;
   Cursor _cursor = Cursor.initial;
+  
+  /// Callback llamado cada vez que el texto cambia.
+  void Function(TextDelta)? onDelta;
 
   TextEngine(String initialText) : _pieceTable = PieceTable(initialText);
 
@@ -32,6 +44,7 @@ class TextEngine {
     final pos = _cursorGlobalPos();
     _pieceTable.insert(pos, value);
     _cursor = _cursor.moveRight(lineLength: _currentLineLength());
+    onDelta?.call(TextDelta(offset: pos, text: value, isInsert: true));
   }
 
   /// Elimina [count] caracteres antes del cursor (backspace).
@@ -43,8 +56,10 @@ class TextEngine {
 
     if (actualCount == 0) return;
 
+    final deletedText = _pieceTable.text.substring(pos - actualCount, pos);
     _pieceTable.delete(pos - actualCount, actualCount);
     _cursor = _cursor.moveLeft();
+    onDelta?.call(TextDelta(offset: pos - actualCount, text: deletedText, isInsert: false));
   }
 
   /// Elimina [count] caracteres después del cursor (delete forward).
@@ -54,7 +69,9 @@ class TextEngine {
 
     if (actualCount == 0) return;
 
+    final deletedText = _pieceTable.text.substring(pos, pos + actualCount);
     _pieceTable.delete(pos, actualCount);
+    onDelta?.call(TextDelta(offset: pos, text: deletedText, isInsert: false));
   }
 
   /// Inserta un salto de línea (Enter).
@@ -129,11 +146,24 @@ class TextEngine {
     _clampCursor();
   }
 
-  // ── Helpers ──
+  /// Convierte una posición de carácter en número de línea (0‑based).
+  int offsetToLine(int offset) {
+    final lengths = _pieceTable.lineLengths;
+    int cum = 0;
+    for (int i = 0; i < lengths.length; i++) {
+      // Cada línea termina con '\n' que no está incluida en length, así que contamos un carácter extra.
+      if (offset <= cum + lengths[i]) return i;
+      cum += lengths[i] + 1; // +1 por el salto de línea
+    }
+    return lengths.isEmpty ? 0 : lengths.length - 1;
+  }
 
   int _cursorGlobalPos() {
     return _pieceTable.lineColToPosition(_cursor.line, _cursor.column);
   }
+
+  /// Convierte una posición global a línea/columna.
+  (int line, int col) positionToLineCol(int pos) => _pieceTable.positionToLineCol(pos);
 
   int _currentLineLength() {
     final lengths = _pieceTable.lineLengths;

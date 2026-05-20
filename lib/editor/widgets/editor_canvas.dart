@@ -53,12 +53,11 @@ class _EditorCanvasState extends State<EditorCanvas>
       duration: const Duration(seconds: 1),
     )..repeat();
     _focusNode = FocusNode(debugLabel: 'LeoEditorFocus');
-    _inputHandler = EditorInputHandler(
-      engine: widget.engine,
-      focusNode: _focusNode,
-      onTextChanged: _onEngineChanged,
-      onCursorMoved: _onCursorMoved,
-    );
+    // Register delta callback to trigger UI updates.
+    widget.engine.onDelta = (delta) {
+      // For now, a full repaint is cheap; could be optimized to repaint only affected line.
+      if (mounted) setState(() {});
+    };
   }
 
   void _onEngineChanged() {

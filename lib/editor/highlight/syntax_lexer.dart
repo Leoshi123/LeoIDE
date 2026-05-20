@@ -1,3 +1,4 @@
+import 'package:flutter/foundation.dart';
 import 'syntax_token.dart';
 
 /// Configuración de tokenización para un lenguaje.
@@ -211,12 +212,28 @@ class LanguageConfig {
   };
 }
 
+class _ParseParams {
+  final String source;
+  final LanguageConfig config;
+  _ParseParams(this.source, this.config);
+}
+
+List<SyntaxToken> _parseSync(_ParseParams params) {
+  final lexer = SyntaxLexer(params.config, params.source);
+  return lexer.tokenize();
+}
+
 /// Lexer FSM que tokeniza código fuente.
 class SyntaxLexer {
   final LanguageConfig config;
   final String text;
 
   SyntaxLexer(this.config, this.text);
+
+  /// Parsea el texto completo en un isolate.
+  static Future<List<SyntaxToken>> parseIsolate(LanguageConfig config, String source) async {
+    return compute(_parseSync, _ParseParams(source, config));
+  }
 
   /// Tokeniza el texto completo.
   List<SyntaxToken> tokenize() {

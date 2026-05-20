@@ -63,20 +63,18 @@ class PythonRunner extends CodeRunner {
 
   @override
   Future<RunResult> run(String code, {OutputCallback? onOutput}) async {
-    final tempDir = Directory('/tmp/leoide');
-    if (!await tempDir.exists()) await tempDir.create(recursive: true);
-
-    final file = File('${tempDir.path}/script.py');
-    await file.writeAsString(code);
-
     final stopwatch = Stopwatch()..start();
     final stdout = <String>[];
     final stderr = <String>[];
 
     try {
-      final process = await Process.start('python3', [file.path],
-          runInShell: true);
+      final process = await Process.start('python3', ['-'], runInShell: true);
       _currentProcess = process;
+
+      // Escribir el código en stdin y cerrar
+      process.stdin.write(code);
+      await process.stdin.flush();
+      await process.stdin.close();
 
       process.stdout
           .transform(utf8.decoder)
@@ -132,9 +130,7 @@ class CRunner extends CodeRunner {
     final tempDir = Directory('/tmp/leoide');
     if (!await tempDir.exists()) await tempDir.create(recursive: true);
 
-    final srcFile = File('${tempDir.path}/program.c');
     final outFile = File('${tempDir.path}/program.out');
-    await srcFile.writeAsString(code);
 
     final stopwatch = Stopwatch()..start();
     final stdout = <String>[];
@@ -143,14 +139,17 @@ class CRunner extends CodeRunner {
     try {
       onOutput?.call('🔨 Compilando con gcc...', false);
 
-      // Compilar
+      // Compilar desde stdin
       final compile = await Process.start('gcc', [
-        srcFile.path,
-        '-o',
-        outFile.path,
+        '-x', 'c', '-', // Lee C desde stdin
+        '-o', outFile.path,
         '-Wall',
       ], runInShell: true);
       _currentProcess = compile;
+
+      compile.stdin.write(code);
+      await compile.stdin.flush();
+      await compile.stdin.close();
 
       compile.stderr
           .transform(utf8.decoder)
@@ -232,9 +231,7 @@ class CppRunner extends CodeRunner {
     final tempDir = Directory('/tmp/leoide');
     if (!await tempDir.exists()) await tempDir.create(recursive: true);
 
-    final srcFile = File('${tempDir.path}/program.cpp');
     final outFile = File('${tempDir.path}/program.out');
-    await srcFile.writeAsString(code);
 
     final stopwatch = Stopwatch()..start();
     final stdout = <String>[];
@@ -244,13 +241,16 @@ class CppRunner extends CodeRunner {
       onOutput?.call('🔨 Compilando con g++...', false);
 
       final compile = await Process.start('g++', [
-        srcFile.path,
-        '-o',
-        outFile.path,
+        '-x', 'c++', '-', // Lee C++ desde stdin
+        '-o', outFile.path,
         '-Wall',
         '-std=c++17',
       ], runInShell: true);
       _currentProcess = compile;
+
+      compile.stdin.write(code);
+      await compile.stdin.flush();
+      await compile.stdin.close();
 
       compile.stderr
           .transform(utf8.decoder)
@@ -328,20 +328,17 @@ class JavaScriptRunner extends CodeRunner {
 
   @override
   Future<RunResult> run(String code, {OutputCallback? onOutput}) async {
-    final tempDir = Directory('/tmp/leoide');
-    if (!await tempDir.exists()) await tempDir.create(recursive: true);
-
-    final file = File('${tempDir.path}/script.js');
-    await file.writeAsString(code);
-
     final stopwatch = Stopwatch()..start();
     final stdout = <String>[];
     final stderr = <String>[];
 
     try {
-      final process = await Process.start('node', [file.path],
-          runInShell: true);
+      final process = await Process.start('node', [], runInShell: true);
       _currentProcess = process;
+
+      process.stdin.write(code);
+      await process.stdin.flush();
+      await process.stdin.close();
 
       process.stdout
           .transform(utf8.decoder)

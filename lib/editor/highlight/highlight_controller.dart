@@ -52,35 +52,56 @@ class HighlightController extends TextEditingController {
     notifyListeners();
   }
 
+  bool _isParsing = false;
+  List<SyntaxToken>? _lastTokens;
+
   @override
   TextSpan buildTextSpan({
     required BuildContext context,
     TextStyle? style,
     required bool withComposing,
   }) {
-    final text = this.text;
+    final currentText = this.text;
 
-    // Solo re-tokenizar si el texto cambió
-    if (text != _lastText) {
-      _lastText = text;
-      _lastLexer = SyntaxLexer(_config, text);
-      _lastHighlighter = SyntaxHighlighter(_config);
-    }
-
-    if (text.isEmpty) {
+    if (currentText.isEmpty) {
       return TextSpan(text: '', style: style);
     }
 
+    if (currentText != _lastText && !_isParsing) {
+      _isParsing = true;
+      final parseText = currentText;
+      SyntaxLexer.parseIsolate(_config, parseText).then((tokens) {
+        _lastText = parseText;
+        _lastTokens = tokens;
+        _isParsing = false;
+        
+        // Only notify if we are still active and need a repaint
+        if (text == parseText) {
+          notifyListeners();
+        } else {
+          // The text changed while parsing, trigger another parse
+          // But we don't do it here directly, notifyListeners() will trigger buildTextSpan again.
+          notifyListeners(); 
+        }
+      });
+    }
+
+    // While parsing, or if tokens don't match text length, return plain text
+    // (A more advanced solution would clamp tokens, but plain text avoids crash)
+    if (_isParsing || _lastTokens == null || _lastText != currentText) {
+      return TextSpan(text: currentText, style: style);
+    }
+
     try {
-      final tokens = _lastLexer!.tokenize();
-      final span = _lastHighlighter!.highlight(text, tokens);
+      _lastHighlighter ??= SyntaxHighlighter(_config);
+      final span = _lastHighlighter!.highlight(currentText, _lastTokens!);
 
       return TextSpan(
         style: style,
         children: span.children,
       );
     } catch (_) {
-      return TextSpan(text: text, style: style);
+      return TextSpan(text: currentText, style: style);
     }
   }
 }
