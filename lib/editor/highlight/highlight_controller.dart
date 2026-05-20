@@ -1,6 +1,7 @@
 import 'package:flutter/material.dart';
 import 'syntax_lexer.dart';
 import 'syntax_highlighter.dart';
+import 'syntax_token.dart';
 import '../lsp/models/lsp_types.dart';
 
 /// TextEditingController que resalta sintaxis en tiempo real.
