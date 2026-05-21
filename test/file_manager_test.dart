@@ -5,7 +5,7 @@ import 'dart:io';
 void main() {
   group('FileManager', () {
     late FileManager fm;
-    final testRoot = '/tmp/leoide_test_${DateTime.now().millisecondsSinceEpoch}';
+    final testRoot = '${Directory.systemTemp.path}/leoide_test_${DateTime.now().millisecondsSinceEpoch}';
 
     setUp(() {
       fm = FileManager(projectRoot: testRoot);

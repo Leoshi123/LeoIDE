@@ -111,7 +111,7 @@ void main() {
     _lspManager = LspManager();
     _lspManager.onDiagnosticsChanged = _onLspDiagnostics;
     _fileManager = FileManager(
-      projectRoot: '${Platform.environment['HOME'] ?? '/tmp'}/LeoIDE',
+      projectRoot: '${Platform.environment['HOME'] ?? Directory.systemTemp.path}/LeoIDE',
     );
     _tabManager = TabManager();
     _loadTabsState();
@@ -163,7 +163,7 @@ void main() {
 
   /// Inicia el servidor LSP para una extensión.
   void _initLspForExtension(String extension) async {
-    final tempPath = '/tmp/leoide/script$extension';
+    final tempPath = '${Directory.systemTemp.path}/leoide/script$extension';
     final client = await _lspManager.startForExtension(extension, tempPath);
     if (client != null) {
       await client.openDocument(_textController.text);

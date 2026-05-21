@@ -127,7 +127,7 @@ class CRunner extends CodeRunner {
 
   @override
   Future<RunResult> run(String code, {OutputCallback? onOutput}) async {
-    final tempDir = Directory('/tmp/leoide');
+    final tempDir = Directory('${Directory.systemTemp.path}/leoide');
     if (!await tempDir.exists()) await tempDir.create(recursive: true);
 
     final outFile = File('${tempDir.path}/program.out');
@@ -228,7 +228,7 @@ class CppRunner extends CodeRunner {
 
   @override
   Future<RunResult> run(String code, {OutputCallback? onOutput}) async {
-    final tempDir = Directory('/tmp/leoide');
+    final tempDir = Directory('${Directory.systemTemp.path}/leoide');
     if (!await tempDir.exists()) await tempDir.create(recursive: true);
 
     final outFile = File('${tempDir.path}/program.out');
@@ -421,7 +421,7 @@ class DartRunner extends CodeRunner {
 
   @override
   Future<RunResult> run(String code, {OutputCallback? onOutput}) async {
-    final tempDir = Directory('/tmp/leoide');
+    final tempDir = Directory('${Directory.systemTemp.path}/leoide');
     if (!await tempDir.exists()) await tempDir.create(recursive: true);
 
     final file = File('${tempDir.path}/script.dart');
@@ -483,7 +483,7 @@ class HtmlRunner extends CodeRunner {
 
   @override
   Future<RunResult> run(String code, {OutputCallback? onOutput}) async {
-    final tempDir = Directory('/tmp/leoide');
+    final tempDir = Directory('${Directory.systemTemp.path}/leoide');
     if (!await tempDir.exists()) await tempDir.create(recursive: true);
 
     final file = File('${tempDir.path}/index.html');
