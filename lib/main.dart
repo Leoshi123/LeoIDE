@@ -11,6 +11,7 @@ import 'editor/completion/models/completion_context.dart';
 import 'editor/highlight/highlight_controller.dart';
 import 'editor/highlight/syntax_lexer.dart';
 import 'editor/models/tab_manager.dart';
+import 'editor/models/workspace_manager.dart';
 import 'editor/widgets/tab_bar.dart';
 import 'editor/lsp/lsp_manager.dart';
 import 'editor/lsp/models/lsp_types.dart';
@@ -70,6 +71,7 @@ class _EditorScreenState extends State<EditorScreen> {
   late final LspManager _lspManager;
   late final FileManager _fileManager;
   late final TabManager _tabManager;
+  late final WorkspaceManager _workspaceManager;
   Timer? _lspDebounce;
   bool _syncing = false;
 
@@ -113,6 +115,15 @@ void main() {
     _fileManager = FileManager(
       projectRoot: '${Platform.environment['HOME'] ?? Directory.systemTemp.path}/LeoIDE',
     );
+    _workspaceManager = WorkspaceManager(
+      configPath: '${_fileManager.projectRoot}/.workspace_config.json',
+    );
+    // Si hay workspace guardado, actualizar FileManager
+    if (_workspaceManager.workspacePath != null) {
+      _fileManager = FileManager(
+        projectRoot: _workspaceManager.workspacePath!,
+      );
+    }
     _tabManager = TabManager();
     _loadTabsState();
     _textController = HighlightController(text: _engine.text);
@@ -642,6 +653,22 @@ void main() {
     }
   }
 
+  /// Abre el selector de carpeta de trabajo.
+  Future<void> _onSelectWorkspace() async {
+    final selected = await _workspaceManager.selectWorkspace(context);
+    if (selected && mounted) {
+      setState(() {
+        _fileManager = FileManager(
+          projectRoot: _workspaceManager.workspacePath!,
+        );
+        _currentFileName = 'sin_titulo.dart';
+        _currentExtension = '.dart';
+        _textController.text = _defaultCode;
+      });
+      _logToTerminal('📂 Workspace cambiado: ${_workspaceManager.workspaceName}');
+    }
+  }
+
   /// Archivo de estado de tabs.
   String get _tabsStatePath =>
       '${_fileManager.projectRoot}/.tabs_state.json';
@@ -1058,18 +1085,74 @@ void main() {
 
     return Scaffold(
       drawer: Drawer(
-        width: 240,
-        child: FileExplorer(
-          fileManager: _fileManager,
-          isDark: _isDark,
-          onFileTap: (fileName) {
-            Navigator.pop(context);
-            _doOpen(fileName);
-          },
-          onFileDelete: (fileName) {
-            _fileManager.deleteFile(fileName);
-            _logToTerminal('🗑️ Eliminado: $fileName');
-          },
+        width: 260,
+        child: Column(
+          children: [
+            // Cabecera del drawer con nombre del workspace
+            Container(
+              width: double.infinity,
+              padding: const EdgeInsets.fromLTRB(16, 40, 16, 12),
+              color: _isDark ? const Color(0xFF2D2D2D) : const Color(0xFFF0F0F0),
+              child: Column(
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: [
+                  Text(
+                    'EXPLORADOR',
+                    style: TextStyle(
+                      fontSize: 11,
+                      fontWeight: FontWeight.w600,
+                      letterSpacing: 1.2,
+                      color: _isDark ? const Color(0xFF858585) : const Color(0xFF616161),
+                    ),
+                  ),
+                  const SizedBox(height: 4),
+                  Row(
+                    children: [
+                      Icon(Icons.folder, size: 16,
+                          color: _isDark ? const Color(0xFF4FC1FF) : const Color(0xFF0066B8)),
+                      const SizedBox(width: 6),
+                      Expanded(
+                        child: Text(
+                          _workspaceManager.workspaceName ?? 'LeoIDE',
+                          style: const TextStyle(
+                            fontFamily: 'monospace',
+                            fontSize: 12,
+                            fontWeight: FontWeight.w600,
+                          ),
+                          overflow: TextOverflow.ellipsis,
+                        ),
+                      ),
+                      IconButton(
+                        icon: const Icon(Icons.edit, size: 14),
+                        tooltip: 'Cambiar workspace',
+                        onPressed: () {
+                          Navigator.pop(context);
+                          _onSelectWorkspace();
+                        },
+                        padding: EdgeInsets.zero,
+                        constraints: const BoxConstraints(),
+                      ),
+                    ],
+                  ),
+                ],
+              ),
+            ),
+            // Lista de archivos
+            Expanded(
+              child: FileExplorer(
+                fileManager: _fileManager,
+                isDark: _isDark,
+                onFileTap: (fileName) {
+                  Navigator.pop(context);
+                  _doOpen(fileName);
+                },
+                onFileDelete: (fileName) {
+                  _fileManager.deleteFile(fileName);
+                  _logToTerminal('🗑️ Eliminado: $fileName');
+                },
+              ),
+            ),
+          ],
         ),
       ),
       appBar: AppBar(
@@ -1094,10 +1177,25 @@ void main() {
             ),
             const SizedBox(width: 8),
             Expanded(
-              child: Text(
-                _currentFileName,
-                style: const TextStyle(fontFamily: 'monospace', fontSize: 13),
-                overflow: TextOverflow.ellipsis,
+              child: Column(
+                crossAxisAlignment: CrossAxisAlignment.start,
+                mainAxisAlignment: MainAxisAlignment.center,
+                children: [
+                  if (_workspaceManager.workspaceName != null)
+                    Text(
+                      _workspaceManager.workspaceName!,
+                      style: TextStyle(
+                        fontSize: 10,
+                        color: _isDark ? const Color(0xFF858585) : const Color(0xFF999999),
+                      ),
+                      overflow: TextOverflow.ellipsis,
+                    ),
+                  Text(
+                    _currentFileName,
+                    style: const TextStyle(fontFamily: 'monospace', fontSize: 13),
+                    overflow: TextOverflow.ellipsis,
+                  ),
+                ],
               ),
             ),
           ],
@@ -1155,6 +1253,14 @@ void main() {
           icon: const Icon(Icons.folder_open_outlined, size: 20),
           tooltip: 'Abrir archivo',
           onPressed: _showOpenDialog,
+        ),
+        // Botón workspace
+        IconButton(
+          icon: const Icon(Icons.folder_special_outlined, size: 20),
+          tooltip: _workspaceManager.workspaceName != null
+              ? 'Workspace: ${_workspaceManager.workspaceName}'
+              : 'Seleccionar carpeta de trabajo',
+          onPressed: _onSelectWorkspace,
         ),
         // Botón terminal
         IconButton(

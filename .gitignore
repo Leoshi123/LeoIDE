@@ -31,6 +31,10 @@ migrate_working_dir/
 .pub-cache/
 .pub/
 /build/
+android/build/
+android/.gradle/
+android/.flutter_sdk_override
+android/.gradle.properties
 /coverage/
 
 # Symbolication related
