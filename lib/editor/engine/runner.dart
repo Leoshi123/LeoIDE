@@ -1,3 +1,4 @@
+import 'dart:async';
 import 'dart:convert';
 import 'dart:io';
 
@@ -7,15 +8,17 @@ class RunResult {
   final List<String> stdout;
   final List<String> stderr;
   final Duration duration;
+  final bool wasCancelled;
 
   const RunResult({
     required this.exitCode,
     required this.stdout,
     required this.stderr,
     required this.duration,
+    this.wasCancelled = false,
   });
 
-  bool get success => exitCode == 0;
+  bool get success => exitCode == 0 && !wasCancelled;
   List<String> get allOutput => [...stdout, ...stderr];
 }
 
@@ -27,13 +30,125 @@ abstract class CodeRunner {
   String get language;
   String get extension;
 
-  /// Referencia al proceso en ejecución (para cancelación).
   Process? _currentProcess;
+  bool _cancelRequested = false;
+
+  /// Callback opcional que se dispara cuando el usuario solicita cancelación.
+  void Function()? onCancelRequested;
 
   /// Cancela la ejecución en curso.
   void cancel() {
+    _cancelRequested = true;
     _currentProcess?.kill(ProcessSignal.sigterm);
     _currentProcess = null;
+    onCancelRequested?.call();
+  }
+
+  /// Resuelve la ruta del binario según la plataforma.
+  String getBinaryPath(String binary) {
+    // En Android los binarios no están en PATH del sistema;
+    // se requiere ruta absoluta al NDK.
+    if (Platform.isAndroid) {
+      return '/data/data/com.leoide.app/files/ndk/$binary';
+    }
+    return binary;
+  }
+
+  /// Ejecuta un proceso con captura garantizada de stdout/stderr,
+  /// orden correcto de registro de listeners, y clasificación de errores.
+  ///
+  /// Orden:
+  /// 1. Iniciar proceso
+  /// 2. Crear StreamControllers síncronos para output en tiempo real
+  /// 3. Registrar listeners de stdout/stderr (ANTES de escribir stdin)
+  /// 4. Escribir código en stdin y cerrar
+  /// 5. Future.wait([exitCode, stdoutDone, stderrDone])
+  /// 6. Retornar RunResult con wasCancelled
+  Future<RunResult> _executeProcess({
+    required Future<Process> Function() processStarter,
+    required String code,
+    OutputCallback? onOutput,
+  }) async {
+    final stopwatch = Stopwatch()..start();
+    final stdoutLines = <String>[];
+    final stderrLines = <String>[];
+    _cancelRequested = false;
+
+    try {
+      final process = await processStarter();
+      _currentProcess = process;
+
+      // StreamControllers síncronos para output en tiempo real thread-safe
+      final stdoutController = StreamController<String>.broadcast(sync: true);
+      final stderrController = StreamController<String>.broadcast(sync: true);
+
+      // Registrar listeners ANTES de escribir stdin
+      // para no perder salida de procesos rápidos
+      final stdoutDone = process.stdout
+          .transform(utf8.decoder)
+          .transform(const LineSplitter())
+          .listen((line) {
+        stdoutLines.add(line);
+        stdoutController.add(line);
+      }).asFuture();
+
+      final stderrDone = process.stderr
+          .transform(utf8.decoder)
+          .transform(const LineSplitter())
+          .listen((line) {
+        stderrLines.add(line);
+        stderrController.add(line);
+      }).asFuture();
+
+      // Conectar callbacks de salida en tiempo real
+      // (thread-safety la gestiona el caller mediante addPostFrameCallback)
+      if (onOutput != null) {
+        stdoutController.stream.listen((line) => onOutput(line, false));
+        stderrController.stream.listen((line) => onOutput(line, true));
+      }
+
+      // Escribir código en stdin y cerrar
+      // (después de registrar listeners — orden crítico)
+      if (code.isNotEmpty) {
+        process.stdin.write(code);
+        await process.stdin.flush();
+      }
+      await process.stdin.close();
+
+      // Esperar a que TODO esté completo:
+      // exitCode + cierre de streams
+      final exitCode = await Future.wait([
+        process.exitCode,
+        stdoutDone,
+        stderrDone,
+      ]).then((results) => results[0] as int);
+
+      stopwatch.stop();
+
+      return RunResult(
+        exitCode: exitCode,
+        stdout: stdoutLines,
+        stderr: stderrLines,
+        duration: stopwatch.elapsed,
+        wasCancelled: _cancelRequested,
+      );
+    } catch (e) {
+      stopwatch.stop();
+      final errorMsg =
+          'Error al ejecutar $language: $e\n'
+          '¿Tienes ${requiredBinary ?? language} instalado?';
+      stderrLines.add(errorMsg);
+      onOutput?.call(errorMsg, true);
+      return RunResult(
+        exitCode: -1,
+        stdout: stdoutLines,
+        stderr: stderrLines,
+        duration: stopwatch.elapsed,
+        wasCancelled: _cancelRequested,
+      );
+    } finally {
+      _currentProcess = null;
+    }
   }
 
   /// Ejecuta el código y captura la salida.
@@ -63,53 +178,12 @@ class PythonRunner extends CodeRunner {
 
   @override
   Future<RunResult> run(String code, {OutputCallback? onOutput}) async {
-    final stopwatch = Stopwatch()..start();
-    final stdout = <String>[];
-    final stderr = <String>[];
-
-    try {
-      final process = await Process.start('python3', ['-'], runInShell: true);
-      _currentProcess = process;
-
-      // Escribir el código en stdin y cerrar
-      process.stdin.write(code);
-      await process.stdin.flush();
-      await process.stdin.close();
-
-      process.stdout
-          .transform(utf8.decoder)
-          .transform(const LineSplitter())
-          .listen((line) {
-        stdout.add(line);
-        onOutput?.call(line, false);
-      });
-
-      process.stderr
-          .transform(utf8.decoder)
-          .transform(const LineSplitter())
-          .listen((line) {
-        stderr.add(line);
-        onOutput?.call(line, true);
-      });
-
-      final exitCode = await process.exitCode;
-      stopwatch.stop();
-
-      return RunResult(
-        exitCode: exitCode,
-        stdout: stdout,
-        stderr: stderr,
-        duration: stopwatch.elapsed,
-      );
-    } catch (e) {
-      stopwatch.stop();
-      stderr.add('Error: $e');
-      return RunResult(
-          exitCode: -1,
-          stdout: stdout,
-          stderr: stderr,
-          duration: stopwatch.elapsed);
-    }
+    return _executeProcess(
+      code: code,
+      onOutput: onOutput,
+      processStarter: () =>
+          Process.start(getBinaryPath('python3'), ['-'], runInShell: true),
+    );
   }
 }
 
@@ -132,85 +206,38 @@ class CRunner extends CodeRunner {
 
     final outFile = File('${tempDir.path}/program.out');
 
-    final stopwatch = Stopwatch()..start();
-    final stdout = <String>[];
-    final stderr = <String>[];
+    onOutput?.call('🔨 Compilando con gcc...', false);
 
-    try {
-      onOutput?.call('🔨 Compilando con gcc...', false);
-
-      // Compilar desde stdin
-      final compile = await Process.start('gcc', [
-        '-x', 'c', '-', // Lee C desde stdin
+    // Fase 1: Compilación desde stdin
+    final compileResult = await _executeProcess(
+      code: code,
+      onOutput: (line, isError) {
+        onOutput?.call('   ⚠️  $line', isError);
+      },
+      processStarter: () => Process.start(getBinaryPath('gcc'), [
+        '-x', 'c', '-',
         '-o', outFile.path,
         '-Wall',
-      ], runInShell: true);
-      _currentProcess = compile;
+      ], runInShell: true),
+    );
 
-      compile.stdin.write(code);
-      await compile.stdin.flush();
-      await compile.stdin.close();
-
-      compile.stderr
-          .transform(utf8.decoder)
-          .transform(const LineSplitter())
-          .listen((line) {
-        stderr.add(line);
-        onOutput?.call('   ⚠️  $line', true);
-      });
-
-      final compileExit = await compile.exitCode;
-
-      if (compileExit != 0) {
-        stopwatch.stop();
-        stderr.add('❌ Compilación fallida (código $compileExit)');
-        return RunResult(
-            exitCode: compileExit,
-            stdout: stdout,
-            stderr: stderr,
-            duration: stopwatch.elapsed);
-      }
-
-      onOutput?.call('✅ Compilación exitosa, ejecutando...', false);
-
-      // Ejecutar
-      await Process.run('chmod', ['+x', outFile.path]);
-      final run = await Process.start(outFile.path, [], runInShell: true);
-      _currentProcess = run;
-
-      run.stdout
-          .transform(utf8.decoder)
-          .transform(const LineSplitter())
-          .listen((line) {
-        stdout.add(line);
-        onOutput?.call(line, false);
-      });
-
-      run.stderr
-          .transform(utf8.decoder)
-          .transform(const LineSplitter())
-          .listen((line) {
-        stderr.add(line);
-        onOutput?.call(line, true);
-      });
-
-      final runExit = await run.exitCode;
-      stopwatch.stop();
-
-      return RunResult(
-          exitCode: runExit,
-          stdout: stdout,
-          stderr: stderr,
-          duration: stopwatch.elapsed);
-    } catch (e) {
-      stopwatch.stop();
-      stderr.add('Error del sistema: $e');
-      return RunResult(
-          exitCode: -1,
-          stdout: stdout,
-          stderr: stderr,
-          duration: stopwatch.elapsed);
+    if (compileResult.exitCode != 0) {
+      // Error de compilación — se propaga el resultado
+      return compileResult;
     }
+
+    onOutput?.call('✅ Compilación exitosa, ejecutando...', false);
+
+    // Asegurar permisos de ejecución
+    await Process.run('chmod', ['+x', outFile.path]);
+
+    // Fase 2: Ejecución del binario compilado
+    return _executeProcess(
+      code: '', // sin stdin
+      onOutput: onOutput,
+      processStarter: () =>
+          Process.start(outFile.path, [], runInShell: true),
+    );
   }
 }
 
@@ -233,84 +260,37 @@ class CppRunner extends CodeRunner {
 
     final outFile = File('${tempDir.path}/program.out');
 
-    final stopwatch = Stopwatch()..start();
-    final stdout = <String>[];
-    final stderr = <String>[];
+    onOutput?.call('🔨 Compilando con g++...', false);
 
-    try {
-      onOutput?.call('🔨 Compilando con g++...', false);
-
-      final compile = await Process.start('g++', [
-        '-x', 'c++', '-', // Lee C++ desde stdin
+    // Fase 1: Compilación desde stdin
+    final compileResult = await _executeProcess(
+      code: code,
+      onOutput: (line, isError) {
+        onOutput?.call('   ⚠️  $line', isError);
+      },
+      processStarter: () => Process.start(getBinaryPath('g++'), [
+        '-x', 'c++', '-',
         '-o', outFile.path,
         '-Wall',
         '-std=c++17',
-      ], runInShell: true);
-      _currentProcess = compile;
+      ], runInShell: true),
+    );
 
-      compile.stdin.write(code);
-      await compile.stdin.flush();
-      await compile.stdin.close();
-
-      compile.stderr
-          .transform(utf8.decoder)
-          .transform(const LineSplitter())
-          .listen((line) {
-        stderr.add(line);
-        onOutput?.call('   ⚠️  $line', true);
-      });
-
-      final compileExit = await compile.exitCode;
-
-      if (compileExit != 0) {
-        stopwatch.stop();
-        stderr.add('❌ Compilación fallida');
-        return RunResult(
-            exitCode: compileExit,
-            stdout: stdout,
-            stderr: stderr,
-            duration: stopwatch.elapsed);
-      }
-
-      onOutput?.call('✅ Compilación exitosa, ejecutando...', false);
-
-      await Process.run('chmod', ['+x', outFile.path]);
-      final run = await Process.start(outFile.path, [], runInShell: true);
-      _currentProcess = run;
-
-      run.stdout
-          .transform(utf8.decoder)
-          .transform(const LineSplitter())
-          .listen((line) {
-        stdout.add(line);
-        onOutput?.call(line, false);
-      });
-
-      run.stderr
-          .transform(utf8.decoder)
-          .transform(const LineSplitter())
-          .listen((line) {
-        stderr.add(line);
-        onOutput?.call(line, true);
-      });
-
-      final runExit = await run.exitCode;
-      stopwatch.stop();
-
-      return RunResult(
-          exitCode: runExit,
-          stdout: stdout,
-          stderr: stderr,
-          duration: stopwatch.elapsed);
-    } catch (e) {
-      stopwatch.stop();
-      stderr.add('Error del sistema: $e');
-      return RunResult(
-          exitCode: -1,
-          stdout: stdout,
-          stderr: stderr,
-          duration: stopwatch.elapsed);
+    if (compileResult.exitCode != 0) {
+      return compileResult;
     }
+
+    onOutput?.call('✅ Compilación exitosa, ejecutando...', false);
+
+    await Process.run('chmod', ['+x', outFile.path]);
+
+    // Fase 2: Ejecución del binario compilado
+    return _executeProcess(
+      code: '',
+      onOutput: onOutput,
+      processStarter: () =>
+          Process.start(outFile.path, [], runInShell: true),
+    );
   }
 }
 
@@ -328,51 +308,12 @@ class JavaScriptRunner extends CodeRunner {
 
   @override
   Future<RunResult> run(String code, {OutputCallback? onOutput}) async {
-    final stopwatch = Stopwatch()..start();
-    final stdout = <String>[];
-    final stderr = <String>[];
-
-    try {
-      final process = await Process.start('node', [], runInShell: true);
-      _currentProcess = process;
-
-      process.stdin.write(code);
-      await process.stdin.flush();
-      await process.stdin.close();
-
-      process.stdout
-          .transform(utf8.decoder)
-          .transform(const LineSplitter())
-          .listen((line) {
-        stdout.add(line);
-        onOutput?.call(line, false);
-      });
-
-      process.stderr
-          .transform(utf8.decoder)
-          .transform(const LineSplitter())
-          .listen((line) {
-        stderr.add(line);
-        onOutput?.call(line, true);
-      });
-
-      final exitCode = await process.exitCode;
-      stopwatch.stop();
-
-      return RunResult(
-          exitCode: exitCode,
-          stdout: stdout,
-          stderr: stderr,
-          duration: stopwatch.elapsed);
-    } catch (e) {
-      stopwatch.stop();
-      stderr.add('Error: $e');
-      return RunResult(
-          exitCode: -1,
-          stdout: stdout,
-          stderr: stderr,
-          duration: stopwatch.elapsed);
-    }
+    return _executeProcess(
+      code: code,
+      onOutput: onOutput,
+      processStarter: () =>
+          Process.start(getBinaryPath('node'), [], runInShell: true),
+    );
   }
 }
 
@@ -398,7 +339,7 @@ class PhpRunner extends CodeRunner {
     onOutput?.call('   sudo pacman -S php', false);
     onOutput?.call('', false);
 
-    return RunResult(
+    return const RunResult(
       exitCode: -1,
       stdout: [],
       stderr: ['PHP no instalado'],
@@ -427,50 +368,14 @@ class DartRunner extends CodeRunner {
     final file = File('${tempDir.path}/script.dart');
     await file.writeAsString(code);
 
-    final stopwatch = Stopwatch()..start();
-    final stdout = <String>[];
-    final stderr = <String>[];
+    onOutput?.call('🚀 Ejecutando con Dart VM...', false);
 
-    try {
-      onOutput?.call('🚀 Ejecutando con Dart VM...', false);
-
-      final process = await Process.start('dart', ['run', file.path],
-          runInShell: true);
-      _currentProcess = process;
-
-      process.stdout
-          .transform(utf8.decoder)
-          .transform(const LineSplitter())
-          .listen((line) {
-        stdout.add(line);
-        onOutput?.call(line, false);
-      });
-
-      process.stderr
-          .transform(utf8.decoder)
-          .transform(const LineSplitter())
-          .listen((line) {
-        stderr.add(line);
-        onOutput?.call(line, true);
-      });
-
-      final exitCode = await process.exitCode;
-      stopwatch.stop();
-
-      return RunResult(
-          exitCode: exitCode,
-          stdout: stdout,
-          stderr: stderr,
-          duration: stopwatch.elapsed);
-    } catch (e) {
-      stopwatch.stop();
-      stderr.add('Error: $e');
-      return RunResult(
-          exitCode: -1,
-          stdout: stdout,
-          stderr: stderr,
-          duration: stopwatch.elapsed);
-    }
+    return _executeProcess(
+      code: '', // no stdin, el código está en el archivo
+      onOutput: onOutput,
+      processStarter: () =>
+          Process.start(getBinaryPath('dart'), ['run', file.path], runInShell: true),
+    );
   }
 }
 
@@ -526,7 +431,7 @@ class CssRunner extends CodeRunner {
     onOutput?.call('   Ejemplo:', false);
     onOutput?.call('   <link rel="stylesheet" href="estilos.css">', false);
 
-    return RunResult(
+    return const RunResult(
       exitCode: 0,
       stdout: ['CSS no es ejecutable directamente'],
       stderr: [],

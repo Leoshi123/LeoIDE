@@ -3,7 +3,6 @@ import 'dart:io';
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'editor/engine/text_engine.dart';
-import 'editor/engine/virtual_viewport.dart';
 import 'editor/engine/runner.dart';
 import 'editor/completion/completion_engine.dart';
 import 'editor/completion/models/completion_item.dart';
@@ -16,12 +15,15 @@ import 'editor/widgets/tab_bar.dart';
 import 'editor/lsp/lsp_manager.dart';
 import 'editor/lsp/models/lsp_types.dart';
 import 'editor/widgets/completion_popup.dart';
-import 'editor/widgets/file_explorer.dart';
 import 'editor/models/code_template.dart';
 import 'editor/engine/language_detector.dart';
 import 'editor/engine/file_manager.dart';
 import 'keyboard/symbol_bar.dart';
 import 'theme/app_theme.dart';
+import 'ui/layout_controller.dart';
+import 'ui/editor_shell.dart';
+import 'ui/sidebar_panel.dart';
+import 'ui/terminal_panel.dart';
 
 void main() {
   runApp(const LeoIDEApp());
@@ -79,7 +81,7 @@ class _EditorScreenState extends State<EditorScreen> {
   String _currentExtension = '.dart';
   String _currentFileName = 'sin_titulo.dart';
   bool _isDark = true;
-  bool _showTerminal = false;
+  late final LayoutController _layoutController;
   int _cursorLine = 1;
   int _cursorColumn = 1;
   final List<String> _terminalLog = [];
@@ -107,6 +109,7 @@ void main() {
   void initState() {
     super.initState();
     _isDark = widget.isDark;
+    _layoutController = LayoutController();
     _engine = TextEngine(_defaultCode);
     _completionEngine = CompletionEngine();
     _completionEngine.buildDocument(_defaultCode);
@@ -981,10 +984,19 @@ void main() {
 
     setState(() {
       _isRunning = true;
-      _showTerminal = true;
       _terminalLog.clear();
       _currentRunner = runner;
     });
+    _layoutController.showTerminal();
+
+    // Sincronizar cancelación con el estado de UI
+    runner.onCancelRequested = () {
+      if (mounted) {
+        WidgetsBinding.instance.addPostFrameCallback((_) {
+          setState(() => _isRunning = false);
+        });
+      }
+    };
 
     _logToTerminal('╔══════════════════════════════════════════');
     _logToTerminal('║ ▶  Ejecutando: $_currentFileName');
@@ -1006,8 +1018,12 @@ void main() {
       final result = await runner.run(
         code,
         onOutput: (line, isError) {
-          if (!_isRunning && mounted) return; // cancelado
-          _logToTerminal(isError ? '⚠️  $line' : '   $line');
+          if (mounted) {
+            WidgetsBinding.instance.addPostFrameCallback((_) {
+              if (!_isRunning) return;
+              _logToTerminal(isError ? '⚠️  $line' : '   $line');
+            });
+          }
         },
       );
 
@@ -1016,9 +1032,11 @@ void main() {
       if (!mounted) return;
 
       _logToTerminal('');
-      if (result.success) {
+      if (result.wasCancelled) {
+        _logToTerminal('⛔ Proceso cancelado por el usuario.');
+      } else if (result.success) {
         _logToTerminal('✅ Proceso completado (${result.duration.inMilliseconds}ms)');
-      } else if (_isRunning) {
+      } else {
         _logToTerminal('❌ Proceso terminado con código ${result.exitCode}');
       }
     } catch (e) {
@@ -1028,7 +1046,8 @@ void main() {
       _logToTerminal('❌ Error del sistema: $e');
     }
 
-    if (mounted) setState(() => _isRunning = false);
+    // Si fue cancelado, onCancelRequested ya limpió _isRunning
+    if (mounted && _isRunning) setState(() => _isRunning = false);
   }
 
   void _onStop() {
@@ -1036,8 +1055,7 @@ void main() {
     _logToTerminal('⛔ Deteniendo proceso...');
     _currentRunner?.cancel();
     _currentRunner = null;
-    setState(() => _isRunning = false);
-    _logToTerminal('⛔ Proceso detenido por el usuario.');
+    // onCancelRequested callback se encarga de setState
   }
 
   void _logToTerminal(String line) {
@@ -1070,12 +1088,12 @@ void main() {
     _textController.dispose();
     _editorFocus.dispose();
     _dismissCompletion();
+    _layoutController.dispose();
     super.dispose();
   }
 
   @override
   Widget build(BuildContext context) {
-    final bgColor = _isDark ? const Color(0xFF1E1E1E) : const Color(0xFFFFFFFF);
     final textColor =
         _isDark ? const Color(0xFFD4D4D4) : const Color(0xFF1E1E1E);
     final gutterBg =
@@ -1083,373 +1101,371 @@ void main() {
     final gutterText =
         _isDark ? const Color(0xFF858585) : const Color(0xFF999999);
 
-    return Scaffold(
-      drawer: Drawer(
-        width: 260,
-        child: Column(
-          children: [
-            // Cabecera del drawer con nombre del workspace
-            Container(
-              width: double.infinity,
-              padding: const EdgeInsets.fromLTRB(16, 40, 16, 12),
-              color: _isDark ? const Color(0xFF2D2D2D) : const Color(0xFFF0F0F0),
-              child: Column(
-                crossAxisAlignment: CrossAxisAlignment.start,
-                children: [
-                  Text(
-                    'EXPLORADOR',
-                    style: TextStyle(
-                      fontSize: 11,
-                      fontWeight: FontWeight.w600,
-                      letterSpacing: 1.2,
-                      color: _isDark ? const Color(0xFF858585) : const Color(0xFF616161),
-                    ),
-                  ),
-                  const SizedBox(height: 4),
-                  Row(
-                    children: [
-                      Icon(Icons.folder, size: 16,
-                          color: _isDark ? const Color(0xFF4FC1FF) : const Color(0xFF0066B8)),
-                      const SizedBox(width: 6),
-                      Expanded(
-                        child: Text(
-                          _workspaceManager.workspaceName ?? 'LeoIDE',
-                          style: const TextStyle(
-                            fontFamily: 'monospace',
-                            fontSize: 12,
-                            fontWeight: FontWeight.w600,
-                          ),
-                          overflow: TextOverflow.ellipsis,
-                        ),
-                      ),
-                      IconButton(
-                        icon: const Icon(Icons.edit, size: 14),
-                        tooltip: 'Cambiar workspace',
-                        onPressed: () {
-                          Navigator.pop(context);
-                          _onSelectWorkspace();
-                        },
-                        padding: EdgeInsets.zero,
-                        constraints: const BoxConstraints(),
-                      ),
-                    ],
-                  ),
-                ],
-              ),
-            ),
-            // Lista de archivos
-            Expanded(
-              child: FileExplorer(
-                fileManager: _fileManager,
-                isDark: _isDark,
-                onFileTap: (fileName) {
-                  Navigator.pop(context);
-                  _doOpen(fileName);
-                },
-                onFileDelete: (fileName) {
-                  _fileManager.deleteFile(fileName);
-                  _logToTerminal('🗑️ Eliminado: $fileName');
-                },
-              ),
-            ),
+    return EditorShell(
+      layoutController: _layoutController,
+      isDark: _isDark,
+      toolbar: _buildToolbar(),
+      tabBar: _buildTabBar(),
+      sidebarContent: _buildSidebar(),
+      editorContent: _buildEditorArea(textColor, gutterBg, gutterText),
+      terminalContent: TerminalPanel(
+        logs: _terminalLog,
+        isDark: _isDark,
+        onClear: _clearTerminal,
+      ),
+      diagnosticsBar: _buildDiagnosticsBar(),
+      statusBar: _buildStatusBar(),
+      bottomBar: _buildSymbolBar(),
+    );
+  }
+
+  // ── Helper methods de construcción ──
+
+  /// Toolbar superior responsive (reemplaza el AppBar).
+  ///
+  /// En móvil (< 600px) agrupa acciones secundarias en un menú.
+  /// En tablet/desktop (>= 600px) muestra todo.
+  Widget _buildToolbar() {
+    final bg = _isDark ? const Color(0xFF2D2D2D) : const Color(0xFFF0F0F0);
+    final langColor =
+        _isDark ? const Color(0xFF4FC1FF) : const Color(0xFF0066B8);
+    final subtitleColor =
+        _isDark ? const Color(0xFF858585) : const Color(0xFF999999);
+    final iconColor =
+        _isDark ? const Color(0xFFCCCCCC) : const Color(0xFF616161);
+    final isCompact = MediaQuery.of(context).size.width < 600;
+
+    return Container(
+      height: 48,
+      color: bg,
+      padding: const EdgeInsets.symmetric(horizontal: 8),
+      child: isCompact ? _buildCompactToolbar(iconColor, langColor, subtitleColor, bg)
+                       : _buildFullToolbar(iconColor, langColor, subtitleColor, bg),
+    );
+  }
+
+  /// Toolbar completa para tablets/desktop.
+  Widget _buildFullToolbar(Color iconColor, Color langColor, Color subtitleColor, Color bg) {
+    return Row(
+      children: [
+        _langChip(langColor),
+        const SizedBox(width: 8),
+        _fileName(subtitleColor),
+        _iconBtn(Icons.menu, 'Explorador', _layoutController.toggleSidebar, iconColor),
+        _iconBtn(Icons.add, 'Nuevo archivo', _showTemplateDialog, iconColor),
+        _iconBtn(Icons.undo, 'Deshacer', _onUndo, iconColor),
+        _iconBtn(Icons.redo, 'Rehacer', _onRedo, iconColor),
+        _runBtn(),
+        if (_isRunning) _stopBtn(),
+        _iconBtn(Icons.save_outlined, 'Guardar', _onSave, iconColor),
+        _iconBtn(Icons.folder_open_outlined, 'Abrir', _showOpenDialog, iconColor),
+        _iconBtn(Icons.folder_special_outlined, 'Workspace', _onSelectWorkspace, iconColor),
+        _terminalBtn(iconColor),
+        _themeBtn(iconColor),
+      ],
+    );
+  }
+
+  /// Toolbar compacta para móviles (< 600px).
+  Widget _buildCompactToolbar(Color iconColor, Color langColor, Color subtitleColor, Color bg) {
+    return Row(
+      children: [
+        _langChip(langColor),
+        const SizedBox(width: 6),
+        _fileName(subtitleColor),
+        _runBtn(),
+        if (_isRunning) _stopBtn(),
+        _iconBtn(Icons.undo, 'Deshacer', _onUndo, iconColor),
+        _iconBtn(Icons.redo, 'Rehacer', _onRedo, iconColor),
+        _iconBtn(Icons.save_outlined, 'Guardar', _onSave, iconColor),
+        // Menú con acciones secundarias
+        PopupMenuButton<String>(
+          icon: Icon(Icons.more_vert, size: 20, color: iconColor),
+          tooltip: 'Más opciones',
+          onSelected: (value) {
+            switch (value) {
+              case 'menu': _layoutController.toggleSidebar();
+              case 'new': _showTemplateDialog();
+              case 'open': _showOpenDialog();
+              case 'workspace': _onSelectWorkspace();
+              case 'terminal': _layoutController.toggleTerminal();
+              case 'theme': setState(() {
+                _isDark = !_isDark;
+                widget.onToggleTheme?.call();
+              });
+            }
+          },
+          itemBuilder: (_) => [
+            const PopupMenuItem(value: 'menu', child: ListTile(leading: Icon(Icons.menu), title: Text('Explorador'), dense: true)),
+            const PopupMenuItem(value: 'new', child: ListTile(leading: Icon(Icons.add), title: Text('Nuevo archivo'), dense: true)),
+            const PopupMenuItem(value: 'open', child: ListTile(leading: Icon(Icons.folder_open_outlined), title: Text('Abrir archivo'), dense: true)),
+            const PopupMenuItem(value: 'workspace', child: ListTile(leading: Icon(Icons.folder_special_outlined), title: Text('Workspace'), dense: true)),
+            const PopupMenuItem(value: 'terminal', child: ListTile(leading: Icon(Icons.terminal), title: Text('Terminal'), dense: true)),
+            const PopupMenuItem(value: 'theme', child: ListTile(leading: Icon(Icons.light_mode), title: Text('Cambiar tema'), dense: true)),
           ],
         ),
+      ],
+    );
+  }
+
+  // ── Sub-componentes de la toolbar ──
+
+  Widget _langChip(Color langColor) {
+    return Container(
+      padding: const EdgeInsets.symmetric(horizontal: 6, vertical: 2),
+      decoration: BoxDecoration(
+        color: _isDark ? const Color(0xFF3C3C3C) : const Color(0xFFE8E8E8),
+        borderRadius: BorderRadius.circular(4),
       ),
-      appBar: AppBar(
-        title: Row(
-          children: [
-            // Icono de lenguaje
-            Container(
-              padding: const EdgeInsets.symmetric(horizontal: 6, vertical: 2),
-              decoration: BoxDecoration(
-                color: _isDark ? const Color(0xFF3C3C3C) : const Color(0xFFE8E8E8),
-                borderRadius: BorderRadius.circular(4),
+      child: Text(
+        _currentExtension.replaceAll('.', '').toUpperCase(),
+        style: TextStyle(
+          fontFamily: 'monospace',
+          fontSize: 11,
+          fontWeight: FontWeight.bold,
+          color: langColor,
+        ),
+      ),
+    );
+  }
+
+  Widget _fileName(Color subtitleColor) {
+    return Expanded(
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        mainAxisAlignment: MainAxisAlignment.center,
+        children: [
+          if (_workspaceManager.workspaceName != null)
+            Text(
+              _workspaceManager.workspaceName!,
+              style: TextStyle(fontSize: 10, color: subtitleColor),
+              overflow: TextOverflow.ellipsis,
+            ),
+          Text(
+            _currentFileName,
+            style: const TextStyle(fontFamily: 'monospace', fontSize: 13),
+            overflow: TextOverflow.ellipsis,
+          ),
+        ],
+      ),
+    );
+  }
+
+  Widget _iconBtn(IconData icon, String tooltip, VoidCallback onPressed, Color color) {
+    return IconButton(
+      icon: Icon(icon, size: 20, color: color),
+      tooltip: tooltip,
+      onPressed: onPressed,
+      constraints: const BoxConstraints(minWidth: 36, minHeight: 36),
+      padding: EdgeInsets.zero,
+    );
+  }
+
+  Widget _runBtn() {
+    return IconButton(
+      icon: Icon(
+        Icons.play_arrow,
+        size: 22,
+        color: _isRunning
+            ? const Color(0xFF4EC9B0)
+            : const Color(0xFF4EC9B0).withValues(alpha: 0.7),
+      ),
+      tooltip: 'Ejecutar código',
+      onPressed: _isRunning ? null : _onRun,
+      constraints: const BoxConstraints(minWidth: 36, minHeight: 36),
+      padding: EdgeInsets.zero,
+    );
+  }
+
+  Widget _stopBtn() {
+    return IconButton(
+      icon: const Icon(Icons.stop, size: 22, color: Colors.redAccent),
+      tooltip: 'Detener ejecución',
+      onPressed: _onStop,
+      constraints: const BoxConstraints(minWidth: 36, minHeight: 36),
+      padding: EdgeInsets.zero,
+    );
+  }
+
+  Widget _terminalBtn(Color iconColor) {
+    return IconButton(
+      icon: Icon(
+        _layoutController.terminalVisible ? Icons.terminal : Icons.terminal_outlined,
+        size: 20,
+        color: iconColor,
+      ),
+      tooltip: 'Terminal',
+      onPressed: _layoutController.toggleTerminal,
+      constraints: const BoxConstraints(minWidth: 36, minHeight: 36),
+      padding: EdgeInsets.zero,
+    );
+  }
+
+  Widget _themeBtn(Color iconColor) {
+    return IconButton(
+      icon: Icon(_isDark ? Icons.light_mode : Icons.dark_mode, size: 20, color: iconColor),
+      tooltip: 'Cambiar tema',
+      onPressed: () {
+        setState(() => _isDark = !_isDark);
+        widget.onToggleTheme?.call();
+      },
+      constraints: const BoxConstraints(minWidth: 36, minHeight: 36),
+      padding: EdgeInsets.zero,
+    );
+  }
+
+  /// Barra de pestañas del editor.
+  Widget _buildTabBar() {
+    return EditorTabBar(
+      tabManager: _tabManager,
+      isDark: _isDark,
+      onTabSelected: _onTabSelected,
+      onTabClosed: _onTabClosed,
+      onTabPinToggle: _onTabPinToggle,
+    );
+  }
+
+  /// Panel lateral (explorador).
+  Widget _buildSidebar() {
+    return SidebarPanel(
+      activeTab: _layoutController.activeTab,
+      isDark: _isDark,
+      fileManager: _fileManager,
+      workspaceManager: _workspaceManager,
+      onFileTap: _doOpen,
+      onFileDelete: (fileName) {
+        _fileManager.deleteFile(fileName);
+        _logToTerminal('🗑️ Eliminado: $fileName');
+      },
+      onChangeWorkspace: _onSelectWorkspace,
+    );
+  }
+
+  /// Área del editor (gutter + TextField + overlay completado).
+  Widget _buildEditorArea(Color textColor, Color gutterBg, Color gutterText) {
+    return Container(
+      color: _isDark ? const Color(0xFF1E1E1E) : const Color(0xFFFFFFFF),
+      child: Stack(
+        children: [
+          // Gutter
+          Positioned(
+            left: 0,
+            top: 0,
+            bottom: 0,
+            child: Container(
+              width: 50,
+              color: gutterBg,
+              padding: const EdgeInsets.only(top: 10, right: 8, bottom: 8),
+              child: _LineNumbers(
+                text: _textController.text,
+                isDark: _isDark,
+                gutterTextColor: gutterText,
+                errorLines: (_textController as HighlightController).errorLines,
+                warningLines: (_textController as HighlightController).warningLines,
               ),
-              child: Text(
-                _currentExtension.replaceAll('.', '').toUpperCase(),
+            ),
+          ),
+          // Editor
+          Padding(
+            padding: const EdgeInsets.only(left: 56.0),
+            child: CompositedTransformTarget(
+              link: _completionLayerLink,
+              child: TextField(
+                controller: _textController,
+                focusNode: _editorFocus,
+                maxLines: null,
+                expands: true,
+                textAlignVertical: TextAlignVertical.top,
+                autofocus: true,
+                enableSuggestions: false,
+                autocorrect: false,
+                keyboardType: TextInputType.multiline,
                 style: TextStyle(
                   fontFamily: 'monospace',
-                  fontSize: 11,
-                  fontWeight: FontWeight.bold,
-                  color: _isDark ? const Color(0xFF4FC1FF) : const Color(0xFF0066B8),
+                  fontSize: 14.0,
+                  height: 1.5,
+                  color: textColor,
                 ),
+                decoration: const InputDecoration(
+                  border: InputBorder.none,
+                  contentPadding: EdgeInsets.only(top: 8, right: 8, bottom: 8),
+                  isCollapsed: true,
+                ),
+                cursorColor:
+                    _isDark ? const Color(0xFF569CD6) : const Color(0xFF0066B8),
+                cursorWidth: 2.0,
+                scrollPhysics: const ClampingScrollPhysics(),
               ),
             ),
-            const SizedBox(width: 8),
-            Expanded(
-              child: Column(
-                crossAxisAlignment: CrossAxisAlignment.start,
-                mainAxisAlignment: MainAxisAlignment.center,
-                children: [
-                  if (_workspaceManager.workspaceName != null)
-                    Text(
-                      _workspaceManager.workspaceName!,
-                      style: TextStyle(
-                        fontSize: 10,
-                        color: _isDark ? const Color(0xFF858585) : const Color(0xFF999999),
-                      ),
-                      overflow: TextOverflow.ellipsis,
-                    ),
-                  Text(
-                    _currentFileName,
-                    style: const TextStyle(fontFamily: 'monospace', fontSize: 13),
-                    overflow: TextOverflow.ellipsis,
-                  ),
-                ],
-              ),
-            ),
-          ],
-        ),
-        actions: [
-          // Menú explorador
-          Builder(
-            builder: (ctx) => IconButton(
-              icon: const Icon(Icons.menu, size: 20),
-              tooltip: 'Explorador de archivos',
-              onPressed: () => Scaffold.of(ctx).openDrawer(),
-            ),
-          ),
-          IconButton(
-            icon: const Icon(Icons.add, size: 20),
-            tooltip: 'Nuevo archivo (plantillas)',
-            onPressed: _showTemplateDialog,
-          ),
-          IconButton(
-            icon: const Icon(Icons.undo, size: 20),
-            tooltip: 'Deshacer',
-            onPressed: _onUndo,
-          ),
-          IconButton(
-            icon: const Icon(Icons.redo, size: 20),
-            tooltip: 'Rehacer',
-            onPressed: _onRedo,
-          ),
-          // Botón Run
-          IconButton(
-            icon: Icon(
-              Icons.play_arrow,
-              size: 22,
-              color: _isRunning ? const Color(0xFF4EC9B0) : null,
-            ),
-            tooltip: 'Ejecutar código',
-            onPressed: _isRunning ? null : _onRun,
-          ),
-          // Botón Stop
-          if (_isRunning)
-            IconButton(
-              icon: const Icon(Icons.stop, size: 22, color: Colors.redAccent),
-              tooltip: 'Detener ejecución',
-              onPressed: _onStop,
-              ),
-        // ── Botón Run ──
-        // Botón guardar
-        IconButton(
-          icon: const Icon(Icons.save_outlined, size: 20),
-          tooltip: 'Guardar (Ctrl+S)',
-          onPressed: _onSave,
-        ),
-        // Botón abrir
-        IconButton(
-          icon: const Icon(Icons.folder_open_outlined, size: 20),
-          tooltip: 'Abrir archivo',
-          onPressed: _showOpenDialog,
-        ),
-        // Botón workspace
-        IconButton(
-          icon: const Icon(Icons.folder_special_outlined, size: 20),
-          tooltip: _workspaceManager.workspaceName != null
-              ? 'Workspace: ${_workspaceManager.workspaceName}'
-              : 'Seleccionar carpeta de trabajo',
-          onPressed: _onSelectWorkspace,
-        ),
-        // Botón terminal
-        IconButton(
-          icon: Icon(
-            _showTerminal ? Icons.terminal : Icons.terminal_outlined,
-            size: 20,
-          ),
-          tooltip: 'Terminal',
-          onPressed: () => setState(() => _showTerminal = !_showTerminal),
-        ),
-          IconButton(
-            icon: Icon(
-              _isDark ? Icons.light_mode : Icons.dark_mode,
-              size: 20,
-            ),
-            tooltip: 'Cambiar tema',
-            onPressed: () {
-              setState(() => _isDark = !_isDark);
-              widget.onToggleTheme?.call();
-            },
           ),
         ],
       ),
-      body: Column(
+    );
+  }
+
+  /// Barra de diagnósticos LSP.
+  Widget _buildDiagnosticsBar() {
+    return _DiagnosticsBar(
+      diagnostics: (_textController as HighlightController).diagnostics,
+      isDark: _isDark,
+      onTap: () => setState(() => _diagnosticsExpanded = !_diagnosticsExpanded),
+      onProblemTap: _scrollToDiagnostic,
+    );
+  }
+
+  /// Barra de estado inferior.
+  Widget _buildStatusBar() {
+    final diagnostics = (_textController as HighlightController).diagnostics;
+    final errors = diagnostics.where((d) => d.severity == 1).length;
+    final warnings = diagnostics.where((d) => d.severity == 2).length;
+
+    return Container(
+      height: 24,
+      color: _isDark ? const Color(0xFF007ACC) : const Color(0xFF0078D4),
+      padding: const EdgeInsets.symmetric(horizontal: 12),
+      child: Row(
         children: [
-          // Barra de tabs
-          EditorTabBar(
-            tabManager: _tabManager,
-            isDark: _isDark,
-            onTabSelected: _onTabSelected,
-            onTabClosed: _onTabClosed,
-            onTabPinToggle: _onTabPinToggle,
+          if (diagnostics.isNotEmpty) ...[
+            _StatusItem(icon: Icons.error_outline, count: errors, label: 'errores'),
+            const SizedBox(width: 12),
+            _StatusItem(icon: Icons.warning_amber, count: warnings, label: 'warnings'),
+          ] else ...[
+            const Text('Listo', style: TextStyle(color: Colors.white, fontSize: 12)),
+          ],
+          const Spacer(),
+          Text(
+            'Ln $_cursorLine, Col $_cursorColumn',
+            style: const TextStyle(color: Colors.white, fontSize: 12),
           ),
-
-          // Editor
-          Expanded(
-            child: Container(
-              color: bgColor,
-              child: Stack(
-                children: [
-                  // Gutter
-                  Positioned(
-                    left: 0,
-                    top: 0,
-                    bottom: 0,
-                    child: Container(
-                      width: 50,
-                      color: gutterBg,
-                      padding:
-                          const EdgeInsets.only(top: 10, right: 8, bottom: 8),
-                      child: _LineNumbers(
-                        text: _textController.text,
-                        isDark: _isDark,
-                        gutterTextColor: gutterText,
-                        errorLines: (_textController as HighlightController)
-                            .errorLines,
-                        warningLines: (_textController as HighlightController)
-                            .warningLines,
-                      ),
-                    ),
-                  ),
-                  // Editor
-                  Padding(
-                    padding: const EdgeInsets.only(left: 56.0),
-                    child: CompositedTransformTarget(
-                      link: _completionLayerLink,
-                      child: TextField(
-                        controller: _textController,
-                        focusNode: _editorFocus,
-                        maxLines: null,
-                        expands: true,
-                        textAlignVertical: TextAlignVertical.top,
-                        autofocus: true,
-                        enableSuggestions: false,
-                        autocorrect: false,
-                        keyboardType: TextInputType.multiline,
-                        style: TextStyle(
-                          fontFamily: 'monospace',
-                          fontSize: 14.0,
-                          height: 1.5,
-                          color: textColor,
-                        ),
-                        decoration: const InputDecoration(
-                          border: InputBorder.none,
-                          contentPadding: EdgeInsets.only(
-                            top: 8,
-                            right: 8,
-                            bottom: 8,
-                          ),
-                          isCollapsed: true,
-                        ),
-                        cursorColor: _isDark
-                            ? const Color(0xFF569CD6)
-                            : const Color(0xFF0066B8),
-                        cursorWidth: 2.0,
-                        scrollPhysics: const ClampingScrollPhysics(),
-                      ),
-                    ),
-                  ),
-                ],
-              ),
-            ),
+          const SizedBox(width: 16),
+          Text(
+            'UTF-8',
+            style: TextStyle(color: Colors.white.withOpacity(0.8), fontSize: 12),
           ),
-
-          // Diagnostics bar
-          _DiagnosticsBar(
-            diagnostics: (_textController as HighlightController).diagnostics,
-            isDark: _isDark,
-            onTap: () => setState(() => _diagnosticsExpanded = !_diagnosticsExpanded),
-            onProblemTap: (line) => _scrollToDiagnostic(line),
-          ),
-
-          // Terminal (panel de salida)
-          if (_showTerminal)
-            _TerminalPanel(
-              logs: _terminalLog,
-              isDark: _isDark,
-              onClear: _clearTerminal,
-            ),
-
-          // Status Bar (estilo VS Code)
-          Container(
-            height: 24,
-            color: _isDark ? const Color(0xFF007ACC) : const Color(0xFF0078D4),
-            padding: const EdgeInsets.symmetric(horizontal: 12),
-            child: Row(
-              children: [
-                // Errores y warnings
-                if ((_textController as HighlightController).diagnostics.isNotEmpty) ...[
-                  _StatusItem(
-                    icon: Icons.error_outline,
-                    count: (_textController as HighlightController).diagnostics
-                        .where((d) => d.severity == 1).length,
-                    label: 'errores',
-                  ),
-                  const SizedBox(width: 12),
-                  _StatusItem(
-                    icon: Icons.warning_amber,
-                    count: (_textController as HighlightController).diagnostics
-                        .where((d) => d.severity == 2).length,
-                    label: 'warnings',
-                  ),
-                ] else ...[
-                  const Text(
-                    'Listo',
-                    style: TextStyle(color: Colors.white, fontSize: 12),
-                  ),
-                ],
-                const Spacer(),
-                // Posición del cursor
-                Text(
-                  'Ln $_cursorLine, Col $_cursorColumn',
-                  style: const TextStyle(color: Colors.white, fontSize: 12),
-                ),
-                const SizedBox(width: 16),
-                // Encoding
-                Text(
-                  'UTF-8',
-                  style: TextStyle(color: Colors.white.withOpacity(0.8), fontSize: 12),
-                ),
-                const SizedBox(width: 16),
-                // Lenguaje
-                Text(
-                  _currentExtension.replaceAll('.', '').toUpperCase(),
-                  style: const TextStyle(color: Colors.white, fontSize: 12),
-                ),
-              ],
-            ),
-          ),
-
-          // Barra de símbolos
-          SymbolBar(
-            fileExtension: _currentExtension,
-            onSymbolTap: (symbol) {
-              _engine.insertAtCursor(symbol);
-              _syncControllerFromEngine();
-            },
-            backgroundColor: _isDark
-                ? const Color(0xFF2D2D2D)
-                : const Color(0xFFE0E0E0),
-            buttonColor: _isDark
-                ? const Color(0xFF3C3C3C)
-                : const Color(0xFFD0D0D0),
-            symbolColor: _isDark
-                ? const Color(0xFFCCCCCC)
-                : const Color(0xFF333333),
+          const SizedBox(width: 16),
+          Text(
+            _currentExtension.replaceAll('.', '').toUpperCase(),
+            style: const TextStyle(color: Colors.white, fontSize: 12),
           ),
         ],
       ),
+    );
+  }
+
+  /// Barra de símbolos inferior.
+  Widget _buildSymbolBar() {
+    return SymbolBar(
+      fileExtension: _currentExtension,
+      onSymbolTap: (symbol) {
+        _engine.insertAtCursor(symbol);
+        _syncControllerFromEngine();
+      },
+      backgroundColor:
+          _isDark ? const Color(0xFF2D2D2D) : const Color(0xFFE0E0E0),
+      buttonColor:
+          _isDark ? const Color(0xFF3C3C3C) : const Color(0xFFD0D0D0),
+      symbolColor:
+          _isDark ? const Color(0xFFCCCCCC) : const Color(0xFF333333),
     );
   }
 }
@@ -1712,113 +1728,4 @@ class _Badge extends StatelessWidget {
   }
 }
 
-/// Panel de terminal para mostrar salida de ejecución.
-class _TerminalPanel extends StatelessWidget {
-  final List<String> logs;
-  final bool isDark;
-  final VoidCallback onClear;
 
-  const _TerminalPanel({
-    required this.logs,
-    required this.isDark,
-    required this.onClear,
-  });
-
-  void _copyAll(BuildContext context) {
-    final text = logs.join('\n');
-    Clipboard.setData(ClipboardData(text: text));
-    ScaffoldMessenger.of(context).showSnackBar(
-      const SnackBar(
-        content: Text('✅ Terminal copiado al portapapeles'),
-        duration: Duration(seconds: 1),
-      ),
-    );
-  }
-
-  @override
-  Widget build(BuildContext context) {
-    return Container(
-      height: 160,
-      color: isDark ? const Color(0xFF1A1A1A) : const Color(0xFFF0F0F0),
-      child: Column(
-        children: [
-          // Barra de título
-          Container(
-            height: 28,
-            padding: const EdgeInsets.symmetric(horizontal: 12),
-            color: isDark ? const Color(0xFF2D2D2D) : const Color(0xFFDDDDDD),
-            child: Row(
-              children: [
-                Text(
-                  'TERMINAL',
-                  style: TextStyle(
-                    fontSize: 11,
-                    fontWeight: FontWeight.w600,
-                    color: isDark
-                        ? const Color(0xFF858585)
-                        : const Color(0xFF666666),
-                  ),
-                ),
-                const Spacer(),
-                // Copiar todo
-                if (logs.isNotEmpty) ...[
-                  GestureDetector(
-                    onTap: () => _copyAll(context),
-                    child: Icon(
-                      Icons.copy,
-                      size: 14,
-                      color: isDark
-                          ? const Color(0xFF858585)
-                          : const Color(0xFF666666),
-                    ),
-                  ),
-                  const SizedBox(width: 12),
-                ],
-                GestureDetector(
-                  onTap: onClear,
-                  child: Icon(
-                    Icons.delete_outline,
-                    size: 16,
-                    color: isDark
-                        ? const Color(0xFF858585)
-                        : const Color(0xFF666666),
-                  ),
-                ),
-              ],
-            ),
-          ),
-          // Contenido
-          Expanded(
-            child: logs.isEmpty
-                ? Center(
-                    child: Text(
-                      'Presiona ▶ Run para ejecutar código',
-                      style: TextStyle(
-                        color: isDark
-                            ? const Color(0xFF555555)
-                            : const Color(0xFF999999),
-                        fontSize: 13,
-                        fontFamily: 'monospace',
-                      ),
-                    ),
-                  )
-                : SingleChildScrollView(
-                    padding: const EdgeInsets.all(8),
-                    child: SelectableText(
-                      logs.join('\n'),
-                      style: TextStyle(
-                        fontFamily: 'monospace',
-                        fontSize: 13,
-                        height: 1.4,
-                        color: isDark
-                            ? const Color(0xFFCCCCCC)
-                            : const Color(0xFF333333),
-                      ),
-                    ),
-                  ),
-          ),
-        ],
-      ),
-    );
-  }
-}
